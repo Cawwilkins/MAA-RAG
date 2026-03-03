@@ -20,7 +20,7 @@ from llama_index.core import QueryBundle
 # Set LLM and embedding model
 Settings.llm = None
 Settings.embed_model = HuggingFaceEmbedding(
-    model_name=r".\models\bge-m3-st",   # <-- local path works
+    model_name=r".\models\ai_models\bge-m3-st",   # <-- local path works
     max_length=1024,               # bge-m3 supports long; pick what you can afford
     device="cuda" if torch.cuda.is_available() else "cpu",  # use gpu for embedding if available
 )
@@ -80,7 +80,7 @@ class HybridRetriever(BaseRetriever):
 
 
 reranker = SentenceTransformerRerank(
-    model=r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Code\models\bge-reranker-base",  # local path
+    model=r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Code\models\ai_models\bge-reranker-base",  # local path
     top_n=5
 )
 
@@ -197,7 +197,7 @@ if __name__ == "__main__":
     print("Loading index...")
     Settings.llm = None
     index = load_index()
-    Settings.llm = HuggingFaceLLM(model_path=r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Code\models\flan-t5-large", temperature=0.1, do_sample=False, max_new_tokens=256, top_p=1.0, repetition_penalty=1.05, context_window=2048)
+    Settings.llm = HuggingFaceLLM(model_path=r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Code\models\ai_models\flan-t5-large", temperature=0.1, do_sample=False, max_new_tokens=256, top_p=1.0, repetition_penalty=1.05, context_window=2048)
     qe = initialize_query_engine(index)
     choice = ""
 
@@ -215,7 +215,7 @@ if __name__ == "__main__":
             Settings.llm = None  # Disable LLM calls in extractors for faster embedding; we just want raw keywords/summaries
             create_index()
             index = load_index()  # reload after creating
-            Settings.llm = HuggingFaceLLM(model_path=r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Code\models\flan-t5-large", temperature=0.1, do_sample=False, max_new_tokens=256, top_p=1.0, repetition_penalty=1.05, context_window=2048)
+            Settings.llm = HuggingFaceLLM(model_path=r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Code\models\ai_models\flan-t5-large", temperature=0.1, do_sample=False, max_new_tokens=256, top_p=1.0, repetition_penalty=1.05, context_window=2048)
             qe = initialize_query_engine(index)
             choice = ""
             print("> MAA Assistant: Index refreshed.")
@@ -231,3 +231,4 @@ if __name__ == "__main__":
 # Need a way to close Qdrant client
 # need a way to add more docs without deleting the db (e.g. add to existing collection, then re-run index creation to update storage)
 # Improve speed
+# need to make folders relative instead of absolute for better portability

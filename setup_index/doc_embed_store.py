@@ -18,7 +18,7 @@ from setup_index.feed_documents import feed_documents
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_OFFLINE"] = "1"
 
-EMBED_MODEL_PATH = r".\models\bge-m3-st"
+EMBED_MODEL_PATH = r".\models\ai_models\bge-m3-st"
 
 embed_model = HuggingFaceEmbedding(
     model_name=EMBED_MODEL_PATH,   # <-- local path works

@@ -138,7 +138,7 @@ class HybridPDFReader(BaseReader):
         return docs
 
 
-poppler_path = r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Release-25.12.0-0\poppler\Library\bin"
+poppler_path = r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Release-25.12.0-0\poppler\Library\bin" #this is outside working directory, may cause issues later
 
 
 # Feed documents into llama_index, returns list of docs with metadata
