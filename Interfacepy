@@ -1,0 +1,233 @@
+from pathlib import Path
+import qdrant_client
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.vector_stores.qdrant import QdrantVectorStore
+from llama_index.core import VectorStoreIndex, Settings, get_response_synthesizer, load_index_from_storage
+from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.storage import StorageContext
+from llama_index.retrievers.bm25 import BM25Retriever
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.postprocessor import SimilarityPostprocessor, LongContextReorder, SentenceTransformerRerank
+import torch
+from models.LLM_Header_File import HuggingFaceLLM
+from llama_index.core.prompts import PromptTemplate
+from setup_index.create_index import create_index
+from typing import List, Set
+from llama_index.core.schema import NodeWithScore
+from llama_index.core.base.base_retriever import BaseRetriever
+from llama_index.core import QueryBundle
+
+# Set LLM and embedding model
+Settings.llm = None
+Settings.embed_model = HuggingFaceEmbedding(
+    model_name=r".\models\bge-m3-st",   # <-- local path works
+    max_length=1024,               # bge-m3 supports long; pick what you can afford
+    device="cuda" if torch.cuda.is_available() else "cpu",  # use gpu for embedding if available
+)
+
+# Path to database
+db_dir = Path(r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Code\vector_db")
+
+
+class HybridRetriever(BaseRetriever):
+    """
+    Sync-only hybrid retriever:
+    - runs vector retriever + BM25 retriever
+    - merges + dedupes results
+    - returns top_k combined candidates (keeps original scores as-is)
+    """
+    def __init__(self, vec_retriever, bm25_retriever, similarity_top_k: int = 10):
+        super().__init__()
+        self._vec = vec_retriever
+        self._bm25 = bm25_retriever
+        self._top_k = similarity_top_k
+
+    def _dedupe(self, nodes: List[NodeWithScore]) -> List[NodeWithScore]:
+        seen: Set[str] = set()
+        out: List[NodeWithScore] = []
+
+        for nws in nodes:
+            node = getattr(nws, "node", nws)
+
+            # Best-effort stable ID
+            nid = (
+                getattr(node, "node_id", None)
+                or getattr(node, "id_", None)
+                or getattr(nws, "id_", None)
+                or None
+            )
+
+            # Fallback to content hash if no id exists
+            if nid is None:
+                text = getattr(node, "text", "") or (node.get_content() if hasattr(node, "get_content") else "")
+                nid = str(hash(text))
+
+            if nid in seen:
+                continue
+            seen.add(nid)
+            out.append(nws)
+
+        return out
+
+    def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+        q = query_bundle.query_str
+
+        vec_nodes = self._vec.retrieve(q)
+        bm25_nodes = self._bm25.retrieve(q)
+
+        merged = self._dedupe(vec_nodes + bm25_nodes)
+        return merged[: self._top_k]
+
+
+reranker = SentenceTransformerRerank(
+    model=r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Code\models\bge-reranker-base",  # local path
+    top_n=5
+)
+
+qa_template = PromptTemplate(
+    "You must answer using ONLY the context.\n"
+    "If the context does not explicitly contain the answer, reply exactly:\n"
+    "I cannot find this in the documents.\n\n"
+    "Context:\n{context_str}\n\n"
+    "Question: {query_str}\n\n"
+    "Answer with a single sentence and include the document path from which you found the answer. Do not add names, ships, or facts not in the context.\n"
+    "Answer:"
+)
+
+refine_template = PromptTemplate(
+    "Update the prior answer using ONLY the new context. If there is no new information, keep the answer concise.\n"
+    "If the answer is still unknown, keep: I cannot find this in the documents.\n\n"
+    "Prior answer:\n{existing_answer}\n\n"
+    "New context:\n{context_msg}\n\n"
+    "Refined answer:"
+)
+
+qa_template_bm25 = PromptTemplate(
+    "Use the following text to answer the question concisely.\n"
+    "If unclear, say 'uncertain'.\n\n"
+    "Text:\n{context_str}\n\n"
+    "Question: {query_str}\n"
+    "Answer:"
+)
+
+# Loads index from vector dB and creates it if it doesn't exist
+def load_index():
+    storage_dir = Path(db_dir) / "storage"
+
+    if not storage_dir.exists():
+        print("No vector db found, creating a new one...")
+        index = create_index()
+        return load_index()
+    else:
+        print("Loading existing vector db...")
+        print("Creating vector store...")
+        client = qdrant_client.QdrantClient(path=db_dir)
+        vector_store = QdrantVectorStore(client=client, collection_name="test_store")
+        storage_context = StorageContext.from_defaults(
+            vector_store=vector_store,
+            persist_dir=str(Path(db_dir) / "storage"),   # <-- must match your build path
+        )
+        index = load_index_from_storage(storage_context)
+    return index
+
+
+# Initializes the query engine with the index
+def initialize_query_engine(index):
+    vec = VectorIndexRetriever(
+        index=index,
+        similarity_top_k=10,                      # widen for recall
+        embed_model=Settings.embed_model,
+    )
+    
+    docstore = index.storage_context.docstore
+
+    bm25 = BM25Retriever.from_defaults(docstore=docstore, similarity_top_k=10)   # BM25 for additional context
+
+    node_posts = [
+        #SimilarityPostprocessor(similarity_cutoff=0.2, min_nodes=1),  # ensure some nodes
+        reranker,
+        LongContextReorder(),
+    ]
+
+    hybrid = HybridRetriever(vec_retriever=vec, bm25_retriever=bm25, similarity_top_k=10)
+
+    synthesizer = get_response_synthesizer(
+        llm=Settings.llm,
+        text_qa_template=qa_template,
+        response_mode="compact",
+    )
+
+    query_engine = RetrieverQueryEngine(
+        retriever=hybrid,
+        response_synthesizer=synthesizer,
+        node_postprocessors=node_posts,
+    )
+    return query_engine
+
+
+# Asks a question using the query engine
+def ask_question(query_engine, question: str):
+    if not question:
+        print("> MAA Assistant: Please provide a question.")
+        return
+    question = question.strip()
+    nodes = query_engine.retriever.retrieve(question)
+
+    if not nodes:
+        print("> MAA Assistant: No relevant results found.")
+        return
+
+    print(f"[DEBUG] Retrieved {len(nodes)} nodes")
+    for i, n in enumerate(nodes[:2]):
+        node_obj = getattr(n, "node", n)
+        text = getattr(node_obj, "text", "") or (node_obj.get_content() if hasattr(node_obj, "get_content") else "")
+        print(f"[Node {i}] {text[:200]!r}")
+
+    response = query_engine.query(question)
+
+    if response:
+        print(f"> MAA Assistant: {response}")
+        return
+    else:
+        print("> MAA Assistant: Sorry, I don't have an answer for that")
+        return
+
+
+if __name__ == "__main__":
+    print("Loading index...")
+    Settings.llm = None
+    index = load_index()
+    Settings.llm = HuggingFaceLLM(model_path=r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Code\models\flan-t5-large", temperature=0.1, do_sample=False, max_new_tokens=256, top_p=1.0, repetition_penalty=1.05, context_window=2048)
+    qe = initialize_query_engine(index)
+    choice = ""
+
+    # Main interaction loop
+    while choice != "Exit" and choice != "exit":
+        choice = input("> MAA Assistant: Hello, what would you like to do? (Ask a question (q), refresh index, Exit): ").strip("\n")
+
+        # Ask a question
+        if choice == "q":
+            question = input("> MAA Assistant: What is your question? ").strip("\n")
+            ask_question(qe, question)
+
+        # Refresh the index
+        elif choice == "refresh index":
+            Settings.llm = None  # Disable LLM calls in extractors for faster embedding; we just want raw keywords/summaries
+            create_index()
+            index = load_index()  # reload after creating
+            Settings.llm = HuggingFaceLLM(model_path=r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Code\models\flan-t5-large", temperature=0.1, do_sample=False, max_new_tokens=256, top_p=1.0, repetition_penalty=1.05, context_window=2048)
+            qe = initialize_query_engine(index)
+            choice = ""
+            print("> MAA Assistant: Index refreshed.")
+
+        # Exit the program
+        elif choice == "Exit":
+            print("> MAA Assistant: Goodbye!")
+
+        # Handle invalid input
+        else:
+            print("> MAA Assistant: Invalid choice. Please try again.")
+
+# Need a way to close Qdrant client
+# need a way to add more docs without deleting the db (e.g. add to existing collection, then re-run index creation to update storage)
+# Improve speed
