@@ -18,19 +18,23 @@ from setup_index.feed_documents import feed_documents
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_OFFLINE"] = "1"
 
-EMBED_MODEL_PATH = r".\models\ai_models\bge-m3-st"
+BASE_DIR = Path(__file__).resolve().parent.parent
+MODELS_DIR = BASE_DIR / "models" / "ai_models"
+VECTOR_DB_DIR = BASE_DIR / "vector_db"
+STORAGE_DIR = VECTOR_DB_DIR / "storage"
+EMBED_MODEL_PATH = MODELS_DIR / "bge-m3-st"
 
 embed_model = HuggingFaceEmbedding(
-    model_name=EMBED_MODEL_PATH,   # <-- local path works
-    max_length=1024,               # bge-m3 supports long; pick what you can afford
+    model_name=str(EMBED_MODEL_PATH),                       # <-- local path works
+    max_length=1024,                                        # bge-m3 supports long; pick what you can afford
     device="cuda" if torch.cuda.is_available() else "cpu",  # use gpu for embedding if available
 )
     
-Settings.llm = None  # Disable LLM calls in extractors for faster embedding; we just want raw keywords/summaries
-Settings.embed_model = embed_model  # Use default embedding model; set to None to avoid unnecessary loading if not used in extractors
+Settings.llm = None                         # Disable LLM calls in extractors for faster embedding; we just want raw keywords/summaries
+Settings.embed_model = embed_model          # Use default embedding model; set to None to avoid unnecessary loading if not used in extractors
+
 
 def debug_print_nodes(nodes, n: int = 3) -> None:
-
     print("\n==== NODE DEBUG SAMPLE ====")
     for i, node in enumerate(nodes[:n]):
         # Node ID varies a bit by LlamaIndex version; these are the common fields
@@ -82,13 +86,11 @@ def doc_embed_store(docs: list[Document]) -> VectorStoreIndex | None:
         print("Initializing Qdrant and storage context...")
 
         # === 1. Create storage directories ===
-        db_dir = Path(r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Code\vector_db")
-        storage_path = Path(r"C:\Users\Christian\Documents\Local_Code\MAA-RAG\Code\vector_db\storage")
-        storage_path.mkdir(parents=True, exist_ok=True)
-        print(f"Storage directories ensured at: {storage_path}\n")
+        STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"Storage directories ensured at: {STORAGE_DIR}\n")
 
         # === 2. Set up Qdrant and storage context ===
-        client = qdrant_client.QdrantClient(path=str(db_dir))
+        client = qdrant_client.QdrantClient(path=str(VECTOR_DB_DIR))
         vector_store = QdrantVectorStore(client=client, collection_name="test_store")
         print("Qdrant client and vector store initialized.\n")
 
@@ -105,17 +107,17 @@ def doc_embed_store(docs: list[Document]) -> VectorStoreIndex | None:
         pipeline = IngestionPipeline(
             transformations=[
                 SentenceSplitter(
-                    chunk_size=500,
-                    chunk_overlap=50,
+                    chunk_size=400,
+                    chunk_overlap=100,
                     include_prev_next_rel=True,
                     paragraph_separator="\n\n"
                 ),
             ],
             vector_store=vector_store,
         )
-        print("Pipeline initialized with no transformations.\n")
+        print("Pipeline initialized with sentence splitter transformation.\n")
 
-        nodes = pipeline.run(documents=docs, show_progress=True)
+        nodes = pipeline.run(documents=docs)
 
         # Metadata keys: creation_date, doc_type, file_name, file_path, file_size, file_type, last_modified_date, page, source, title
 
@@ -127,17 +129,17 @@ def doc_embed_store(docs: list[Document]) -> VectorStoreIndex | None:
         storage_context.docstore.add_documents(nodes)
 
         print("Documents added to Docstore.\n")
+        print("Persisting Docstore to memory...")
         # === 5. Build and persist the vector index ===
         index = VectorStoreIndex(
             nodes, 
             storage_context=storage_context, 
-            show_progress=True,
             embed_model=Settings.embed_model
         )
         print("VectorStoreIndex created with embedded nodes.\n")
-        index.storage_context.persist(persist_dir=str(storage_path))
+        index.storage_context.persist(persist_dir=str(STORAGE_DIR))
 
-        print(f"✅ Docstore and index persisted successfully to: {storage_path}")
+        print(f"✅ Docstore and index persisted successfully to: {STORAGE_DIR}")
         return index
 
     except Exception as e:

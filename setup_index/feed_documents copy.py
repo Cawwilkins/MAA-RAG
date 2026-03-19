@@ -43,6 +43,24 @@ def fix_pipe_pronoun_I(text: str) -> str:
     return text
 
 
+# Get ID of documents
+def get_source_id(file_path: str | Path, docs_dir: Path) -> str:
+    """Stable ID for a source file: relative path from Docs/."""
+    return Path(file_path).resolve().relative_to(docs_dir.resolve()).as_posix()
+
+# Get size and last change timestamp of doc
+def get_file_state(file_path: str | Path, docs_dir: Path) -> dict:
+    """Cheap metadata used to decide whether a file likely changed."""
+    path = Path(file_path)
+    stat = path.stat()
+    return {
+        "source_id": get_source_id(path, docs_dir),
+        "file_path": str(path.resolve()),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
 class HybridPDFReader(BaseReader):
     """
     Reads PDFs with a hybrid strategy:
@@ -116,6 +134,7 @@ class HybridPDFReader(BaseReader):
             pages_text = [clean_ocr(t) for t in pages_text]
             source = "ocr_pdf"
         
+        source_id = get_source_id(file, DOCS_DIR)
         filename = os.path.basename(file)
         title = os.path.splitext(filename)[0]
 
@@ -133,13 +152,32 @@ class HybridPDFReader(BaseReader):
                         "source": source,
                         "title": title,
                         "doc_type": doc_type,
+                        "source_id": source_id,
                     },
                 )
             )
         return docs
 
+
+def collect_pdf_paths(file_paths: Optional[list[str | Path]] = None) -> list[Path]:
+    """
+    Normalize and validate a provided list of PDF file paths.
+    """
+    if not file_paths:
+        return []
+
+    cleaned: list[Path] = []
+    for p in file_paths:
+        path = Path(p).resolve()
+        if path.exists() and path.suffix.lower() == ".pdf":
+            cleaned.append(path)
+
+    return cleaned
+
+
+
 # Feed documents into llama_index, returns list of docs with metadata
-def feed_documents(dir_path: str | None = None) -> list[Document]:
+def feed_documents(file_paths: Optional[list[str | Path]] = None) -> list[Document]:
     if dir_path is None:
         dir_path = str(DOCS_DIR)
 
@@ -161,24 +199,36 @@ def feed_documents(dir_path: str | None = None) -> list[Document]:
             ".PDF": pdf_reader,
         },
     )
+    
+    pdf_paths = collect_pdf_paths(file_paths)
+    if not pdf_paths:
+        return []
 
-    documents = reader.load_data()
+    documents: list[Document] = []
+    for pdf_path in pdf_paths:
+        documents.extend(reader.load_data(pdf_path))
+
     print(f"Loaded {len(documents)} documents from {dir_path}")
     return documents
 
 
 if __name__ == "__main__":
-    docs = feed_documents()
+    all_pdf_files = list(DOCS_DIR.rglob("*.pdf"))
+    docs = feed_documents(file_paths=all_pdf_files)
 
     print(f"\nLoaded {len(docs)} documents\n")
 
-    # Inspect a few documents to verify ingestion + metadata
     for d in docs[:5]:
         print("TITLE:", d.metadata.get("title"))
         print("TYPE:", d.metadata.get("doc_type"))
         print("SOURCE:", d.metadata.get("source"))
         print("FILE:", d.metadata.get("file_path"))
         print("PAGE:", d.metadata.get("page"))
+        print("SOURCE_ID:", d.metadata.get("source_id"))
         print("TEXT PREVIEW:")
         print(d.text[:300])
         print("-" * 50)
+
+
+## IDea is to go through all subfolders, check against json file if that doc is in the db
+##if not, write info to json file, then add path to array, this array is what is sent to reader load_data
