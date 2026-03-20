@@ -1,5 +1,4 @@
 import os
-from random import sample
 from llama_index.core import Document, VectorStoreIndex, Settings
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.ingestion import IngestionPipeline
@@ -12,9 +11,7 @@ import traceback
 import qdrant_client
 import torch
 
-from setup_index.feed_documents import feed_documents
-
-# Hard-force offline mode (optional but recommended)
+# Hard-force offline mode
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_OFFLINE"] = "1"
 
@@ -23,120 +20,184 @@ MODELS_DIR = BASE_DIR / "models" / "ai_models"
 VECTOR_DB_DIR = BASE_DIR / "vector_db"
 STORAGE_DIR = VECTOR_DB_DIR / "storage"
 EMBED_MODEL_PATH = MODELS_DIR / "bge-m3-st"
+COLLECTION_NAME = "test_store"
 
 embed_model = HuggingFaceEmbedding(
-    model_name=str(EMBED_MODEL_PATH),                       # <-- local path works
-    max_length=1024,                                        # bge-m3 supports long; pick what you can afford
-    device="cuda" if torch.cuda.is_available() else "cpu",  # use gpu for embedding if available
+    model_name=str(EMBED_MODEL_PATH),
+    max_length=1024,
+    device="cuda" if torch.cuda.is_available() else "cpu",
 )
-    
-Settings.llm = None                         # Disable LLM calls in extractors for faster embedding; we just want raw keywords/summaries
-Settings.embed_model = embed_model          # Use default embedding model; set to None to avoid unnecessary loading if not used in extractors
+
+Settings.llm = None
+Settings.embed_model = embed_model
 
 
 def debug_print_nodes(nodes, n: int = 3) -> None:
     print("\n==== NODE DEBUG SAMPLE ====")
     for i, node in enumerate(nodes[:n]):
-        # Node ID varies a bit by LlamaIndex version; these are the common fields
         node_id = getattr(node, "node_id", None) or getattr(node, "id_", None)
-
         text = getattr(node, "text", "") or ""
         meta = getattr(node, "metadata", {}) or {}
-
-        # Relationships: prev/next etc (since include_prev_next_rel=True)
         rels = getattr(node, "relationships", {}) or {}
 
         print(f"\n--- Node {i} ---")
         print("node_id:", node_id)
         print("text_len:", len(text))
         print("text_preview:", repr(text[:250]))
-
-        # Print the metadata you care about (safe .get calls)
         print("metadata:")
         print("  title:", meta.get("title"))
         print("  doc_type:", meta.get("doc_type"))
         print("  source:", meta.get("source"))
         print("  file_path:", meta.get("file_path"))
         print("  page:", meta.get("page"))
+        print("  source_id:", meta.get("source_id"))
 
-        # Keywords / summary often land in metadata; print anything extractor-like
         extractor_keys = [k for k in meta.keys() if "keyword" in k.lower() or "summary" in k.lower()]
         if extractor_keys:
             print("extractor_fields:")
             for k in extractor_keys:
                 print(f"  {k}: {meta.get(k)}")
 
-        # Show relationship keys and a compact view of IDs if present
         if rels:
             print("relationships keys:", list(rels.keys()))
-            # Try to show any linked node ids without overprinting
             for rk, rv in rels.items():
-                # relationship objects vary; attempt a readable id
                 rid = getattr(rv, "node_id", None) or getattr(rv, "id_", None) or str(rv)
                 print(f"  {rk}: {rid[:120]}")
 
 
+def delete_old_docstore_nodes(storage_context: StorageContext, source_ids_to_replace: set[str]) -> None:
+    """
+    Remove existing nodes from the docstore whose metadata.source_id matches
+    one of the incoming source IDs.
+    """
+    docstore_docs = getattr(storage_context.docstore, "docs", {}) or {}
+    node_ids_to_delete = []
+
+    for node_id, node in docstore_docs.items():
+        metadata = getattr(node, "metadata", {}) or {}
+        if metadata.get("source_id") in source_ids_to_replace:
+            node_ids_to_delete.append(node_id)
+
+    if not node_ids_to_delete:
+        print("No matching existing docstore nodes found to delete.")
+        return
+
+    print(f"Deleting {len(node_ids_to_delete)} old node(s) from docstore...")
+    for node_id in node_ids_to_delete:
+        try:
+            storage_context.docstore.delete_document(node_id)
+        except Exception as e:
+            print(f"Warning: failed to delete docstore node {node_id}: {e}")
+
+
+def delete_old_qdrant_points(client: qdrant_client.QdrantClient, source_ids_to_replace: set[str]) -> None:
+    """
+    Remove existing vectors from Qdrant whose payload source_id matches
+    one of the incoming source IDs.
+    """
+    from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+
+    for source_id in source_ids_to_replace:
+        try:
+            print(f"Deleting old Qdrant points for source_id={source_id}")
+            client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=Filter(
+                    must=[
+                        FieldCondition(
+                            key="source_id",
+                            match=MatchValue(value=source_id),
+                        )
+                    ]
+                ),
+            )
+        except Exception as e:
+            print(f"Warning: failed to delete Qdrant points for {source_id}: {e}")
+
+
 def doc_embed_store(docs: list[Document]) -> VectorStoreIndex | None:
-    Settings.llm = None  # Disable LLM calls in extractors for faster embedding; we just want raw keywords/summaries
+    Settings.llm = None
+
     if not docs:
         print("No documents to embed.")
         return None
 
+    client = None
+
     try:
         print("Initializing Qdrant and storage context...")
 
-        # === 1. Create storage directories ===
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-        print(f"Storage directories ensured at: {STORAGE_DIR}\n")
+        print(f"Storage directory ensured at: {STORAGE_DIR}\n")
 
-        # === 2. Set up Qdrant and storage context ===
+        # Collect source_ids from incoming docs
+        source_ids_to_replace = {
+            doc.metadata.get("source_id")
+            for doc in docs
+            if doc.metadata.get("source_id")
+        }
+
+        if not source_ids_to_replace:
+            print("Warning: no source_id values found in incoming docs.")
+        else:
+            print(f"Incoming source_ids to upsert: {sorted(source_ids_to_replace)}")
+
         client = qdrant_client.QdrantClient(path=str(VECTOR_DB_DIR))
-        vector_store = QdrantVectorStore(client=client, collection_name="test_store")
+        vector_store = QdrantVectorStore(client=client, collection_name=COLLECTION_NAME)
         print("Qdrant client and vector store initialized.\n")
 
-        # Create a fresh in-memory docstore (so it doesn't try to load a missing file)
-        docstore = SimpleDocumentStore()
-        storage_context = StorageContext.from_defaults(
-            docstore=docstore,
-            vector_store=vector_store
-        )
-        print("Storage context created with in-memory docstore and Qdrant vector store.\n")
+        docstore_path = STORAGE_DIR / "docstore.json"
 
-        # === 3. Run the ingestion pipeline (in-memory only) ===
-        print("Running ingestion pipeline... (Enrich Phase)")
+        if docstore_path.exists():
+            storage_context = StorageContext.from_defaults(
+                persist_dir=str(STORAGE_DIR),
+                vector_store=vector_store,
+            )
+            print("Loaded existing persisted storage context.\n")
+        else:
+            docstore = SimpleDocumentStore()
+            storage_context = StorageContext.from_defaults(
+                docstore=docstore,
+                vector_store=vector_store,
+            )
+            print("Created new storage context.\n")
+
+        # Delete old versions before inserting new ones
+        if source_ids_to_replace:
+            delete_old_docstore_nodes(storage_context, source_ids_to_replace)
+            delete_old_qdrant_points(client, source_ids_to_replace)
+
+        print("Running ingestion pipeline... (chunking phase)")
         pipeline = IngestionPipeline(
             transformations=[
                 SentenceSplitter(
                     chunk_size=400,
                     chunk_overlap=100,
                     include_prev_next_rel=True,
-                    paragraph_separator="\n\n"
+                    paragraph_separator="\n\n",
                 ),
             ],
-            vector_store=vector_store,
         )
         print("Pipeline initialized with sentence splitter transformation.\n")
 
         nodes = pipeline.run(documents=docs)
 
-        # Metadata keys: creation_date, doc_type, file_name, file_path, file_size, file_type, last_modified_date, page, source, title
-
         debug_print_nodes(nodes, n=5)
         print(f"✅ Pipeline completed. Generated {len(nodes)} nodes.")
 
-        # === 4. Store the text nodes explicitly for BM25 retrieval ===
         print("Adding nodes to docstore...")
         storage_context.docstore.add_documents(nodes)
+        print("Nodes added to docstore.\n")
 
-        print("Documents added to Docstore.\n")
-        print("Persisting Docstore to memory...")
-        # === 5. Build and persist the vector index ===
+        print("Building vector index and embedding nodes...")
         index = VectorStoreIndex(
-            nodes, 
-            storage_context=storage_context, 
-            embed_model=Settings.embed_model
+            nodes,
+            storage_context=storage_context,
+            embed_model=Settings.embed_model,
         )
-        print("VectorStoreIndex created with embedded nodes.\n")
+        print("VectorStoreIndex created.\n")
+
+        print("Persisting docstore and index to disk...")
         index.storage_context.persist(persist_dir=str(STORAGE_DIR))
 
         print(f"✅ Docstore and index persisted successfully to: {STORAGE_DIR}")
@@ -148,11 +209,8 @@ def doc_embed_store(docs: list[Document]) -> VectorStoreIndex | None:
         return None
 
     finally:
-        try:
-            client.close()
-        except Exception:
-            pass
-
-if __name__ == "__main__":
-    docs = feed_documents()
-    doc_embed_store(docs)
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
