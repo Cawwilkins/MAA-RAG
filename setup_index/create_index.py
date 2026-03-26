@@ -1,11 +1,9 @@
 from __future__ import annotations
-
 import json
 import traceback
 import time
 from pathlib import Path
 from typing import Any
-
 from llama_index.core import VectorStoreIndex
 from setup_index.feed_documents_upsert import feed_documents
 from setup_index.doc_embed_store import doc_embed_store
@@ -15,8 +13,9 @@ from setup_index.file_utils import get_source_id
 # Where you store file metadata
 STORED_FILES_PATH = Path(r"C:\Users\Christian.DESKTOP-2DI7LJ6\Documents\Local_Code\MAA-RAG\MAA-RAG Code\setup_index\stored_files.json")
 DOCS_ROOT = Path(r"C:\Users\Christian.DESKTOP-2DI7LJ6\Documents\Local_Code\MAA-RAG\MAA-RAG Code\Docs")
+DEFAULT_MAX_UPSERT_FILES = 20
 
-
+# Gets the state of each file, such as path, source id, size, and last edit time
 def get_file_state(file_path: str | Path, root_path: str | Path) -> dict[str, Any]:
     path = Path(file_path).resolve()
     stat = path.stat()
@@ -27,6 +26,8 @@ def get_file_state(file_path: str | Path, root_path: str | Path) -> dict[str, An
         "mtime_ns": stat.st_mtime_ns,
     }
 
+
+# Brings the json of stored files into RAM
 def load_stored_files(json_path: Path) -> dict[str, dict[str, Any]]:
     if not json_path.exists():
         return {}
@@ -46,11 +47,14 @@ def load_stored_files(json_path: Path) -> dict[str, dict[str, Any]]:
         return {}
 
 
+# Write all the files that will be stored to json file
+    # This is a bit easy to break as if embedding fails, json file still contains the names
 def save_stored_files(json_path: Path, data: dict[str, dict[str, Any]]) -> None:
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
+# Check the state of each file against the json list
 def file_state_changed(old_state: dict[str, Any], new_state: dict[str, Any]) -> bool:
     return (
         old_state.get("size") != new_state.get("size")
@@ -59,6 +63,7 @@ def file_state_changed(old_state: dict[str, Any], new_state: dict[str, Any]) -> 
     )
 
 
+# Parses docs in given path, checks if they need to be added to store, if so adds to list of files to be inserted
 def parse_documents(root_path: str | Path, json_path: Path = STORED_FILES_PATH) -> list[str]:
     # Took .02 seconds with 41 docs, meaning took that long to compile list of docs to be added
     parse_start = time.perf_counter()
@@ -71,7 +76,24 @@ def parse_documents(root_path: str | Path, json_path: Path = STORED_FILES_PATH) 
     files_to_upsert: list[str] = []
     count = 0
 
+    user_input = input(
+        "> MAA Assistant: How many files would you like to upsert "
+        "(40 will take ~35 minutes)? Press Enter for default: "
+    )
+
+    if user_input.strip() == "":
+        max_upsert_files = DEFAULT_MAX_UPSERT_FILES
+    else:
+        try:
+            max_upsert_files = int(user_input)
+        except ValueError:
+            print("Invalid input. Using default of 40.")
+            max_upsert_files = DEFAULT_MAX_UPSERT_FILES
+            
     for path in root.rglob("*"):
+        if count >= max_upsert_files:
+            print("> MAA Assistant: Stopping embedding early because max file count reached.")
+            break
         if not path.is_file():
             continue
         if path.suffix.lower() != ".pdf":
@@ -114,6 +136,7 @@ def parse_documents(root_path: str | Path, json_path: Path = STORED_FILES_PATH) 
     return files_to_upsert
 
 
+# Runs the parser, feeds docs, and upserts to doc store
 def create_index(filepath: str | Path) -> VectorStoreIndex | None:
     total_start = time.perf_counter()
 
@@ -132,6 +155,7 @@ def create_index(filepath: str | Path) -> VectorStoreIndex | None:
             print(files)
 
         load_start = time.perf_counter()
+        print("About to feed documents")
         documents = feed_documents(files_to_upsert, docs_root=filepath)
         load_elapsed = time.perf_counter() - load_start
         print(f"feed_documents took {load_elapsed:.2f} seconds")
@@ -162,6 +186,8 @@ def create_index(filepath: str | Path) -> VectorStoreIndex | None:
         total_elapsed = time.perf_counter() - total_start
         print(f"Total runtime before failure: {total_elapsed:.2f} seconds")
         return None
+
+
 
 
 if __name__ == "__main__":

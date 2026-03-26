@@ -5,6 +5,7 @@ from llama_index.core.llms.callbacks import llm_completion_callback, llm_chat_ca
 from llama_index.core.bridge.pydantic import PrivateAttr
 import torch
 
+
 class HuggingFaceLLM(CustomLLM):
     """
     Works with BOTH causal LMs (e.g., distilgpt2) and seq2seq LMs (e.g., google/flan-t5-base).
@@ -16,6 +17,7 @@ class HuggingFaceLLM(CustomLLM):
     - Exposes generation params via __init__.
     - Uses tokenizer.model_max_length for accurate context window.
     """
+
     _tokenizer: Any = PrivateAttr()
     _model: Any = PrivateAttr()
     _generator: Any = PrivateAttr()
@@ -34,6 +36,7 @@ class HuggingFaceLLM(CustomLLM):
         **kwargs: Any
     ):
         super().__init__(**kwargs)
+
         from transformers import (
             AutoTokenizer,
             AutoConfig,
@@ -42,29 +45,29 @@ class HuggingFaceLLM(CustomLLM):
             pipeline,
         )
 
-        # Load tokenizer + config first to decide which model class to use
         self._tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
-        self._tokenizer.model_max_length = 450     # or any context window you want
+        self._tokenizer.model_max_length = 450
         self._tokenizer.truncation_side = "right"
-        config = AutoConfig.from_pretrained(model_path)
 
-        # Decide if encoder-decoder (seq2seq) or decoder-only (causal)
+        config = AutoConfig.from_pretrained(model_path)
         self._is_seq2seq = bool(getattr(config, "is_encoder_decoder", False))
 
         if self._is_seq2seq:
             self._model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
-            self._generator = None  # we'll call model.generate() directly
+            self._generator = None
         else:
             self._model = AutoModelForCausalLM.from_pretrained(model_path)
-            task = "text-generation"
-            # Set pad_token_id to eos if missing to avoid warnings/blanks
+
             if self._tokenizer.pad_token_id is None and self._tokenizer.eos_token_id is not None:
                 self._tokenizer.pad_token_id = self._tokenizer.eos_token_id
+
             self._generator = pipeline(
-                task, model=self._model, tokenizer=self._tokenizer, device=device
+                "text-generation",
+                model=self._model,
+                tokenizer=self._tokenizer,
+                device=device,
             )
 
-        # Reasonable generation defaults; can be overridden per-call
         self._gen_defaults = dict(
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -74,10 +77,10 @@ class HuggingFaceLLM(CustomLLM):
 
     @property
     def metadata(self) -> LLMMetadata:
-        # Use tokenizer's real window; many HF tokenizers use large sentinel values, guard it
         ctx = getattr(self._tokenizer, "model_max_length", 2048)
-        if ctx and ctx > 100_000_000_000:  # HF sometimes sets very large int for "infinite"
+        if ctx and ctx > 100_000_000_000:
             ctx = 2048
+
         return LLMMetadata(
             model_name="local-hf-seq2seq" if self._is_seq2seq else "local-hf-causal",
             context_window=ctx,
@@ -87,27 +90,20 @@ class HuggingFaceLLM(CustomLLM):
         )
 
     def _apply_defaults(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        # LlamaIndex passes extra args; ignore ones the HF pipeline doesn't know
-        bad_keys = {"formatted"}  # common from LI
+        bad_keys = {"formatted"}
         clean = {k: v for k, v in kwargs.items() if k not in bad_keys}
-        # Our defaults only fill missing values
+
         for k, v in self._gen_defaults.items():
             clean.setdefault(k, v)
-        # For causal models, avoid echoing prompt
+
+        clean.setdefault("truncation", True)
+
         if not self._is_seq2seq:
             clean.setdefault("return_full_text", False)
-            clean.setdefault("truncation", True)
-        else:
-            # text2text-generation handles truncation internally; keep it explicit anyway
-            clean.setdefault("truncation", True)
+
         return clean
 
-    # ---------- Completion APIs ----------
-
-    @llm_completion_callback()
-    def complete(self, prompt: str, **kwargs: Any) -> CompletionResponse:
-        params = self._apply_defaults(kwargs)
-
+    def _generate_seq2seq(self, prompt: str, params: Dict[str, Any]) -> str:
         inputs = self._tokenizer(
             prompt,
             return_tensors="pt",
@@ -115,7 +111,6 @@ class HuggingFaceLLM(CustomLLM):
             max_length=self._tokenizer.model_max_length,
         )
 
-        # Move tensors to model device
         inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
 
         gen_kwargs = dict(
@@ -128,38 +123,45 @@ class HuggingFaceLLM(CustomLLM):
         with torch.no_grad():
             output_ids = self._model.generate(**inputs, **gen_kwargs)
 
-        out = self._tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        return self._tokenizer.decode(output_ids[0], skip_special_tokens=True)
+
+    def _generate_text(self, prompt: str, params: Dict[str, Any]) -> str:
+        if self._is_seq2seq:
+            return self._generate_seq2seq(prompt, params)
+
+        if self._generator is None:
+            raise RuntimeError("Causal model generator was not initialized.")
+
+        return self._generator(prompt, **params)[0]["generated_text"]
+
+    @llm_completion_callback()
+    def complete(self, prompt: str, **kwargs: Any) -> CompletionResponse:
+        params = self._apply_defaults(kwargs)
+        out = self._generate_text(prompt, params)
         return CompletionResponse(text=out)
 
     @llm_completion_callback()
     def stream_complete(self, prompt: str, **kwargs: Any):
-        # Simulated streaming by chunking the final text (HF pipeline doesn't stream)
         params = self._apply_defaults(kwargs)
-        full = self._generator(prompt, **params)[0]["generated_text"]
+        full = self._generate_text(prompt, params)
+
         buf = ""
         for ch in full:
             buf += ch
             yield CompletionResponse(text=buf, delta=ch)
 
-    # ---------- Chat APIs ----------
-
     def _format_chat(self, messages: Sequence[ChatMessage]) -> str:
-        """
-        Tiny, neutral chat template that works for both causal and seq2seq models.
-        You can swap this for a model-specific template if needed.
-        """
         system_parts = [m.content for m in messages if m.role == "system"]
-        user_parts = [m.content for m in messages if m.role == "user"]
-        assistant_parts = [m.content for m in messages if m.role == "assistant"]
 
         system = f"System: {system_parts[-1]}\n" if system_parts else ""
         history = ""
+
         for m in messages[:-1]:
             if m.role == "user":
                 history += f"User: {m.content}\n"
             elif m.role == "assistant":
                 history += f"Assistant: {m.content}\n"
-        # last message should be user
+
         last = messages[-1].content if messages else ""
         prompt = f"{system}{history}User: {last}\nAssistant:"
         return prompt
@@ -168,14 +170,15 @@ class HuggingFaceLLM(CustomLLM):
     def chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
         prompt = self._format_chat(messages)
         params = self._apply_defaults(kwargs)
-        out = self._generator(prompt, **params)[0]["generated_text"]
+        out = self._generate_text(prompt, params)
         return ChatResponse(content=out)
 
     @llm_chat_callback()
     def stream_chat(self, messages: Sequence[ChatMessage], **kwargs: Any):
         prompt = self._format_chat(messages)
         params = self._apply_defaults(kwargs)
-        full = self._generator(prompt, **params)[0]["generated_text"]
+        full = self._generate_text(prompt, params)
+
         buf = ""
         for ch in full:
             buf += ch

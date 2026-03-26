@@ -1,11 +1,9 @@
 from __future__ import annotations
-
 import os
 import re
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from pypdf import PdfReader
@@ -13,12 +11,11 @@ import pytesseract
 from pdf2image import convert_from_path
 from PIL import ImageOps
 from setup_index.file_utils import get_source_id
+#from file_utils import get_source_id
 
 DOCS_DIR = Path(r"C:\Users\Christian.DESKTOP-2DI7LJ6\Documents\Local_Code\MAA-RAG\MAA-RAG Code\Docs")
-
-
-def get_source_id(file_path: str | Path, root_path: str | Path) -> str:
-    return Path(file_path).resolve().relative_to(Path(root_path).resolve()).as_posix()
+OCR_THREAD_COUNT = 1
+OCR_MAX_WORKERS = 6
 
 
 def preprocess_for_ocr(img):
@@ -67,7 +64,7 @@ class HybridPDFReader(BaseReader):
     def _ocr_text(self, file_path: str) -> List[str]:
         kwargs = {
             "dpi": self._dpi,
-            "thread_count": 8,
+            "thread_count": OCR_THREAD_COUNT,
         }
 
         if self._poppler_path:
@@ -85,7 +82,7 @@ class HybridPDFReader(BaseReader):
             text = fix_pipe_pronoun_I(text)
             return text.strip()
 
-        with ThreadPoolExecutor(max_workers=8) as ex:
+        with ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as ex:
             return list(ex.map(ocr_one, images))
 
     def load_data(
@@ -130,12 +127,12 @@ class HybridPDFReader(BaseReader):
         return docs
 
 
-def collect_pdf_paths(file_paths: Optional[list[str | Path]] = None) -> list[Path]:
-    if not file_paths:
+def collect_pdf_paths(file_paths_to_insert: Optional[list[str | Path]] = None) -> list[Path]:
+    if not file_paths_to_insert:
         return []
 
     cleaned: list[Path] = []
-    for p in file_paths:
+    for p in file_paths_to_insert:
         path = Path(p).resolve()
         if path.exists() and path.is_file() and path.suffix.lower() == ".pdf":
             cleaned.append(path)
@@ -143,9 +140,9 @@ def collect_pdf_paths(file_paths: Optional[list[str | Path]] = None) -> list[Pat
     return cleaned
 
 
-def feed_documents(file_paths: Optional[list[str | Path]] = None,docs_root: str | Path = DOCS_DIR) -> list[Document]:
+def feed_documents(file_paths_to_insert: Optional[list[str | Path]] = None, docs_root: str | Path = DOCS_DIR) -> list[Document]:
     #Took about 56 seconds with 41 docs to read each 
-    pdf_paths = collect_pdf_paths(file_paths)
+    pdf_paths = collect_pdf_paths(file_paths_to_insert)
     if not pdf_paths:
         print("No valid PDF files provided to feed_documents.")
         return []
@@ -169,19 +166,13 @@ def feed_documents(file_paths: Optional[list[str | Path]] = None,docs_root: str 
     return documents
 
 
+import time
+
 if __name__ == "__main__":
+    start = time.time()
+
     all_pdf_files = list(DOCS_DIR.rglob("*.pdf"))
-    docs = feed_documents(file_paths=all_pdf_files, docs_root=DOCS_DIR)
+    docs = feed_documents(file_paths_to_insert=all_pdf_files, docs_root=DOCS_DIR)
 
-    print(f"\nLoaded {len(docs)} documents\n")
-
-    for d in docs[:5]:
-        print("TITLE:", d.metadata.get("title"))
-        print("TYPE:", d.metadata.get("doc_type"))
-        print("SOURCE:", d.metadata.get("source"))
-        print("FILE:", d.metadata.get("file_path"))
-        print("PAGE:", d.metadata.get("page"))
-        print("SOURCE_ID:", d.metadata.get("source_id"))
-        print("TEXT PREVIEW:")
-        print(d.text[:300])
-        print("-" * 50)
+    print(f"\nLoaded {len(docs)} documents")
+    print(f"Elapsed time: {time.time() - start:.2f} seconds\n")

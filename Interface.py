@@ -1,6 +1,7 @@
 from pathlib import Path
 import qdrant_client
 import torch
+import time
 from typing import List, Set, Dict
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -35,6 +36,9 @@ Settings.embed_model = HuggingFaceEmbedding(
 
 BASE_DIR = Path(__file__).resolve().parent
 db_dir = BASE_DIR / "vector_db"
+DOCS_ROOT = BASE_DIR / "Docs"
+INDEX_ID = "main_index"
+COLLECTION_NAME = "test_store"
 
 # -----------------------------
 # Better hybrid retriever:
@@ -171,22 +175,24 @@ def load_index():
 
     if not storage_dir.exists():
         print("No vector db found, creating a new one...")
-        create_index()
+        create_index(DOCS_ROOT)
         return load_index()
 
     print("Loading existing vector db...")
-    client = qdrant_client.QdrantClient(path=db_dir)
-    vector_store = QdrantVectorStore(client=client, collection_name="test_store")
+    client = qdrant_client.QdrantClient(path=str(db_dir))
+    vector_store = QdrantVectorStore(client=client, collection_name=COLLECTION_NAME)
     storage_context = StorageContext.from_defaults(
         vector_store=vector_store,
         persist_dir=str(storage_dir),
     )
-    index = load_index_from_storage(storage_context)
+    
+    index = load_index_from_storage(storage_context, index_id=INDEX_ID)
     return index
 
 
 def initialize_query_engine(index):
 
+    print("Docstore keys:", len(index.docstore.docs))
     hybrid = HybridRetriever(
         vec_retriever = VectorIndexRetriever(
             index=index,
@@ -231,15 +237,22 @@ def ask_question(query_engine, hybrid, question: str, see_results):
         return
 
     question = question.strip()
+
+    total_start = time.time()
+
     print("> MAA Assistant: Retrieving relevant information...")
+    retrieval_start = time.time()
 
     semantic_nodes = hybrid._vec.retrieve(question)
     keyword_nodes = hybrid._bm25.retrieve(question)
     hybrid_nodes = hybrid.retrieve(question)
 
+    retrieval_time = time.time() - retrieval_start
+
     print(f"> MAA Assistant: Retrieved {len(semantic_nodes)} semantic nodes.")
     print(f"> MAA Assistant: Retrieved {len(keyword_nodes)} keyword nodes.")
     print(f"> MAA Assistant: Retrieved {len(hybrid_nodes)} fused candidate nodes.")
+    print(f"> MAA Assistant: Retrieval took {retrieval_time:.2f}s")
 
     if see_results.lower().strip() == "y":
         print("\n--- SEMANTIC RESULTS ---")
@@ -256,19 +269,36 @@ def ask_question(query_engine, hybrid, question: str, see_results):
         return
 
     print("> MAA Assistant: Working on response...")
+    gen_start = time.time()
+
     response = query_engine.query(question)
+
+    gen_time = time.time() - gen_start
+    total_time = time.time() - total_start
 
     if response:
         print(f"> MAA Assistant: {response}")
     else:
         print("> MAA Assistant: Sorry, I don't have an answer for that")
 
+    print(f"> MAA Assistant: Generation took {gen_time:.2f}s")
+    print(f"> MAA Assistant: Total time {total_time:.2f}s")
+
 
 if __name__ == "__main__":
-    print("Loading index...")
     Settings.llm = None
-    index = load_index()
+    start_or_refresh = ""
+    while start_or_refresh not in {"s", "r"}:
+        start_or_refresh = input("> MAA Assistant: Hello, would you like to start the system or first refresh the index (s for start, r for refresh): ").strip("\n")
+        start_or_refresh = start_or_refresh.lower()
 
+    if start_or_refresh == "r":
+        create_index(DOCS_ROOT)
+        print("> MAA Assistant: Index refreshed.")
+
+    print("Loading index...")
+    index = load_index()
+    print("Docstore keys after reload:", len(index.docstore.docs))
     Settings.llm = HuggingFaceLLM(
         model_path=str(BASE_DIR / "models" / "ai_models" / "flan-t5-large"),
         temperature=0.1,
@@ -285,33 +315,14 @@ if __name__ == "__main__":
     while choice not in {"Exit", "exit"}:
         choice = input(
             "> MAA Assistant: Hello, what would you like to do? "
-            "(Ask a question (q), refresh index, Exit): "
+            "(Ask a question (q) or Exit): "
         ).strip("\n")
 
         if choice == "q":
             question = input("> MAA Assistant: What is your question? ").strip("\n")
             see_results = input("> MAA Assistant: Would you like to see the resturned results? ")
-            #results = input("> MAA Assistant: How many results would you like the model to choose from (higher = longer wait): ")
             ask_question(qe, hybrid, question, see_results)
-
-        elif choice == "refresh index":
-            Settings.llm = None
-            create_index()
-            index = load_index()
-            Settings.llm = HuggingFaceLLM(
-                model_path=r".\models\ai_models\flan-t5-large",
-                temperature=0.1,
-                do_sample=False,
-                max_new_tokens=256,
-                top_p=1.0,
-                repetition_penalty=1.05,
-                context_window=4096,
-            )
-            qe = initialize_query_engine(index)
-            print("> MAA Assistant: Index refreshed.")
-
         elif choice == "Exit":
             print("> MAA Assistant: Goodbye!")
-
         else:
             print("> MAA Assistant: Invalid choice. Please try again.")
