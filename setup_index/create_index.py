@@ -8,12 +8,8 @@ from llama_index.core import VectorStoreIndex
 from setup_index.feed_documents_upsert import feed_documents
 from setup_index.doc_embed_store import doc_embed_store
 from setup_index.file_utils import get_source_id
+from config import DOCS_DIR, STORED_FILES_PATH, DEFAULT_MAX_UPSERT_FILES
 
-
-# Where you store file metadata
-STORED_FILES_PATH = Path(r"C:\Users\Christian.DESKTOP-2DI7LJ6\Documents\Local_Code\MAA-RAG\MAA-RAG Code\setup_index\stored_files.json")
-DOCS_ROOT = Path(r"C:\Users\Christian.DESKTOP-2DI7LJ6\Documents\Local_Code\MAA-RAG\MAA-RAG Code\Docs")
-DEFAULT_MAX_UPSERT_FILES = 20
 
 # Gets the state of each file, such as path, source id, size, and last edit time
 def get_file_state(file_path: str | Path, root_path: str | Path) -> dict[str, Any]:
@@ -193,7 +189,7 @@ def create_index(filepath: str | Path) -> VectorStoreIndex | None:
 if __name__ == "__main__":
     #total pipeline is 35 mins
     program_start = time.perf_counter()
-    index = create_index(DOCS_ROOT)
+    index = create_index(DOCS_DIR)
     program_elapsed = time.perf_counter() - program_start
 
     if index is not None:

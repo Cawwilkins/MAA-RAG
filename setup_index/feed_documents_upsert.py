@@ -11,11 +11,7 @@ import pytesseract
 from pdf2image import convert_from_path
 from PIL import ImageOps
 from setup_index.file_utils import get_source_id
-#from file_utils import get_source_id
-
-DOCS_DIR = Path(r"C:\Users\Christian.DESKTOP-2DI7LJ6\Documents\Local_Code\MAA-RAG\MAA-RAG Code\Docs")
-OCR_THREAD_COUNT = 1
-OCR_MAX_WORKERS = 6
+from config import DOCS_DIR, OCR_MAX_WORKERS, OCR_THREAD_COUNT
 
 
 def preprocess_for_ocr(img):

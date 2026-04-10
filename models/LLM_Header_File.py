@@ -1,9 +1,13 @@
-from typing import Sequence, Any, Optional, Dict
+from typing import Sequence, Any, Optional, Dict, List
 from llama_index.core.llms.custom import CustomLLM
 from llama_index.core.llms import LLMMetadata, CompletionResponse, ChatMessage, ChatResponse
 from llama_index.core.llms.callbacks import llm_completion_callback, llm_chat_callback
 from llama_index.core.bridge.pydantic import PrivateAttr
 import torch
+from llama_index.core import QueryBundle
+from llama_index.core.schema import NodeWithScore
+from llama_index.core.base.base_retriever import BaseRetriever
+from config import MIXED_TOP_K, MAX_NEW_TOKENS, CONTEXT_WINDOW, MODEL_DO_SAMPLE, MODEL_TEMPERATURE, MODEL_TOP_P
 
 
 class HuggingFaceLLM(CustomLLM):
@@ -28,10 +32,10 @@ class HuggingFaceLLM(CustomLLM):
         self,
         model_path: str,
         *,
-        max_new_tokens: int = 256,
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        do_sample: bool = True,
+        max_new_tokens: int = MAX_NEW_TOKENS,
+        temperature: float = MODEL_TEMPERATURE,
+        top_p: float = MODEL_TOP_P,
+        do_sample: bool = MODEL_DO_SAMPLE,
         device: Optional[int] = None,   # None = auto, int = cuda device id, -1 = CPU
         **kwargs: Any
     ):
@@ -46,7 +50,6 @@ class HuggingFaceLLM(CustomLLM):
         )
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
-        self._tokenizer.model_max_length = 450
         self._tokenizer.truncation_side = "right"
 
         config = AutoConfig.from_pretrained(model_path)
@@ -77,9 +80,8 @@ class HuggingFaceLLM(CustomLLM):
 
     @property
     def metadata(self) -> LLMMetadata:
-        ctx = getattr(self._tokenizer, "model_max_length", 2048)
-        if ctx and ctx > 100_000_000_000:
-            ctx = 2048
+        ctx = CONTEXT_WINDOW
+        print("context is ", ctx)
 
         return LLMMetadata(
             model_name="local-hf-seq2seq" if self._is_seq2seq else "local-hf-causal",
@@ -183,3 +185,106 @@ class HuggingFaceLLM(CustomLLM):
         for ch in full:
             buf += ch
             yield ChatResponse(content=buf, delta=ch)
+
+
+# -----------------------------
+# Better hybrid retriever:
+# uses Reciprocal Rank Fusion (RRF)
+# -----------------------------
+class HybridRetriever(BaseRetriever):
+    """
+    Hybrid retriever using:
+    - vector retrieval
+    - BM25 retrieval
+    - dedupe by node id
+    - reciprocal rank fusion (RRF)
+
+    This avoids unfairly favoring vector results and gives BM25
+    a real chance to contribute before reranking.
+    """
+    def __init__(
+        self,
+        vec_retriever,
+        bm25_retriever,
+        final_top_k: int = MIXED_TOP_K,
+        rrf_k: int = 60,
+        debug: bool = True,
+    ):
+        super().__init__()
+        self._vec = vec_retriever
+        self._bm25 = bm25_retriever
+        self._final_top_k = final_top_k
+        self._rrf_k = rrf_k
+        self._debug = debug
+
+    def _get_node_id(self, nws: NodeWithScore) -> str:
+        node = getattr(nws, "node", nws)
+        nid = (
+            getattr(node, "node_id", None)
+            or getattr(node, "id_", None)
+            or getattr(nws, "id_", None)
+        )
+
+        if nid is None:
+            text = getattr(node, "text", "") or (
+                node.get_content() if hasattr(node, "get_content") else ""
+            )
+            nid = str(hash(text))
+
+        return nid
+
+    def _preview(self, nws: NodeWithScore, limit: int = 120) -> str:
+        node = getattr(nws, "node", nws)
+        text = getattr(node, "text", "") or (
+            node.get_content() if hasattr(node, "get_content") else ""
+        )
+        return text[:limit].replace("\n", " ")
+
+    def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+        q = query_bundle.query_str
+
+        vec_nodes = self._vec.retrieve(q)
+        bm25_nodes = self._bm25.retrieve(q)
+
+        if self._debug:
+            print("\nVECTOR RESULTS:")
+            for i, n in enumerate(vec_nodes[:5]):
+                print(i, n.score, self._preview(n))
+
+            print("\nBM25 RESULTS:")
+            for i, n in enumerate(bm25_nodes[:5]):
+                print(i, n.score, self._preview(n))
+
+        id_to_node: Dict[str, NodeWithScore] = {}
+        fused_scores: Dict[str, float] = {}
+
+        # Vector contribution
+        for rank, nws in enumerate(vec_nodes, start=1):
+            nid = self._get_node_id(nws)
+            id_to_node[nid] = nws
+            fused_scores[nid] = fused_scores.get(nid, 0.0) + 1.0 / (self._rrf_k + rank)
+
+        # BM25 contribution
+        for rank, nws in enumerate(bm25_nodes, start=1):
+            nid = self._get_node_id(nws)
+            if nid not in id_to_node:
+                id_to_node[nid] = nws
+            fused_scores[nid] = fused_scores.get(nid, 0.0) + 1.0 / (self._rrf_k + rank)
+
+        ranked_ids = sorted(
+            fused_scores.keys(),
+            key=lambda nid: fused_scores[nid],
+            reverse=True,
+        )
+
+        results: List[NodeWithScore] = []
+        for nid in ranked_ids[: self._final_top_k]:
+            nws = id_to_node[nid]
+            results.append(NodeWithScore(node=nws.node, score=fused_scores[nid]))
+
+        if self._debug:
+            print("\nFUSED RESULTS:")
+            for i, n in enumerate(results[:10]):
+                print(i, n.score, self._preview(n))
+
+        return results

@@ -5,32 +5,16 @@ from llama_index.core.ingestion import IngestionPipeline
 from llama_index.core.storage import StorageContext
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.core.storage.docstore import SimpleDocumentStore
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from pathlib import Path
 import traceback
 import qdrant_client
-import torch
+from config import INDEX_ID, DB_DIR, STORAGE_DIR, EMBED_MODEL, COLLECTION_NAME
 
 # Hard-force offline mode
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_OFFLINE"] = "1"
-INDEX_ID = "main_index"
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-MODELS_DIR = BASE_DIR / "models" / "ai_models"
-VECTOR_DB_DIR = BASE_DIR / "vector_db"
-STORAGE_DIR = VECTOR_DB_DIR / "storage"
-EMBED_MODEL_PATH = MODELS_DIR / "bge-m3-st"
-COLLECTION_NAME = "test_store"
-
-embed_model = HuggingFaceEmbedding(
-    model_name=str(EMBED_MODEL_PATH),
-    max_length=1024,
-    device="cuda" if torch.cuda.is_available() else "cpu",
-)
 
 Settings.llm = None
-Settings.embed_model = embed_model
+Settings.embed_model = EMBED_MODEL
 
 # Debug function to see node info
 def debug_print_nodes(nodes, n: int = 3) -> None:
@@ -151,7 +135,7 @@ def doc_embed_store(docs: list[Document]) -> VectorStoreIndex | None:
             print(f"Incoming source_ids to upsert: {sorted(source_ids_to_replace)}")
 
         # Initialize Qdrant client
-        client = qdrant_client.QdrantClient(path=str(VECTOR_DB_DIR))
+        client = qdrant_client.QdrantClient(path=str(DB_DIR))
         vector_store = QdrantVectorStore(client=client, collection_name=COLLECTION_NAME)
         print("Qdrant client and vector store initialized.\n")
 
