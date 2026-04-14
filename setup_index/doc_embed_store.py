@@ -1,20 +1,18 @@
 import os
 from llama_index.core import Document, VectorStoreIndex, Settings, load_index_from_storage
-from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.ingestion import IngestionPipeline
 from llama_index.core.storage import StorageContext
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.core.storage.docstore import SimpleDocumentStore
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core.node_parser import SentenceSplitter
 import traceback
 import qdrant_client
-from config import INDEX_ID, DB_DIR, STORAGE_DIR, EMBED_MODEL, COLLECTION_NAME
+from config import INDEX_ID, DB_DIR, STORAGE_DIR, EMBED_MODEL_CONFIG, COLLECTION_NAME, DOCS_STORE, SENTENCE_SPLITTER_CONFIG
 
 # Hard-force offline mode
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_OFFLINE"] = "1"
-
-Settings.llm = None
-Settings.embed_model = EMBED_MODEL
 
 # Debug function to see node info
 def debug_print_nodes(nodes, n: int = 3) -> None:
@@ -105,7 +103,8 @@ def delete_old_qdrant_points(client: qdrant_client.QdrantClient, source_ids_to_r
 # Embeds documents and adds them to vector store
 def doc_embed_store(docs: list[Document]) -> VectorStoreIndex | None:
     Settings.llm = None
-
+    embed_model = HuggingFaceEmbedding(**EMBED_MODEL_CONFIG)
+    Settings.embed_model = embed_model
     # Ensure Docs have actually been passed
     if not docs:
         print("No documents to embed.")
@@ -140,7 +139,7 @@ def doc_embed_store(docs: list[Document]) -> VectorStoreIndex | None:
         print("Qdrant client and vector store initialized.\n")
 
         # Set Docstore path
-        docstore_path = STORAGE_DIR / "docstore.json"
+        docstore_path = DOCS_STORE
 
 
         # If it exists, load the storage_context
@@ -172,12 +171,7 @@ def doc_embed_store(docs: list[Document]) -> VectorStoreIndex | None:
         print("Running ingestion pipeline... (chunking phase)")
         pipeline = IngestionPipeline(
             transformations=[
-                SentenceSplitter(
-                    chunk_size=400,
-                    chunk_overlap=100,
-                    include_prev_next_rel=True,
-                    paragraph_separator="\n\n",
-                ),
+                SentenceSplitter(**SENTENCE_SPLITTER_CONFIG)
             ],
         )
         print("Pipeline initialized with sentence splitter transformation.\n")

@@ -81,7 +81,6 @@ class HuggingFaceLLM(CustomLLM):
     @property
     def metadata(self) -> LLMMetadata:
         ctx = CONTEXT_WINDOW
-        print("context is ", ctx)
 
         return LLMMetadata(
             model_name="local-hf-seq2seq" if self._is_seq2seq else "local-hf-causal",

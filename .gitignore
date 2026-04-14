@@ -1,4 +1,5 @@
 vector_db/
 Docs/
+Docs to Not Yet Index/
 models/ai_models/
 setup_index/stored_files.json

@@ -21,20 +21,7 @@ from llama_index.core.base.base_retriever import BaseRetriever
 from llama_index.core.prompts import PromptTemplate
 from models.LLM_Header_File import HuggingFaceLLM, HybridRetriever
 from setup_index.create_index import create_index
-from config import EMBED_MODEL, DB_DIR, STORAGE_DIR, DOCS_DIR, COLLECTION_NAME, INDEX_ID, QA_TEMPLATE, RERANK_MODEL, SIMILARITY_TOP_K, MIXED_TOP_K, GENERATIVE_MODEL_PATH, MAX_NEW_TOKENS, CONTEXT_WINDOW
-
-# -----------------------------
-# Global model setup
-# -----------------------------
-Settings.llm = None
-Settings.embed_model = EMBED_MODEL
-GENERATIVE_MODEL = HuggingFaceLLM(
-    model_path=str(GENERATIVE_MODEL_PATH),
-    do_sample=False,
-    max_new_tokens=MAX_NEW_TOKENS,
-    repetition_penalty=1.05,
-    context_window=CONTEXT_WINDOW
-)
+from config import EMBED_MODEL_CONFIG, DB_DIR, STORAGE_DIR, DOCS_DIR, COLLECTION_NAME, INDEX_ID, QA_TEMPLATE, RERANK_MODEL_CONFIG, GENERATIVE_MODEL_CONFIG, SIMILARITY_TOP_K, MIXED_TOP_K
 
 
 def show_nodes(nodes, show_score=True):
@@ -100,14 +87,14 @@ def initialize_query_engine(index):
         llm=Settings.llm,
         text_qa_template=QA_TEMPLATE,
         response_mode="compact",
-        streaming=True,
+        streaming=False, #turned off because it apparently increases lag and wasnt working for me
     )
 
     query_engine = RetrieverQueryEngine(
         retriever = hybrid,
         response_synthesizer = synthesizer,
         node_postprocessors = [
-            RERANK_MODEL,
+            SentenceTransformerRerank(**RERANK_MODEL_CONFIG),
             LongContextReorder(),
         ]
     )
@@ -168,24 +155,28 @@ def ask_question(query_engine, hybrid, question: str, see_results):
     print(f"> MAA Assistant: Total time {total_time:.2f}s")
 
 
-if __name__ == "__main__":
+def main():
     Settings.llm = None
+    Settings.embed_model = HuggingFaceEmbedding(**EMBED_MODEL_CONFIG)
+
+    # If refreshing DB
     start_or_refresh = ""
     while start_or_refresh not in {"s", "r"}:
         start_or_refresh = input("> MAA Assistant: Hello, would you like to start the system or first refresh the index (s for start, r for refresh): ").strip("\n")
         start_or_refresh = start_or_refresh.lower()
-
     if start_or_refresh == "r":
         create_index(DOCS_DIR)
         print("> MAA Assistant: Index refreshed.")
 
+    # Load Index and Initialize QE
     print("Loading index...")
     index = load_index()
     print("Docstore keys after reload:", len(index.docstore.docs))
-    Settings.llm = GENERATIVE_MODEL
+    Settings.llm = HuggingFaceLLM(**GENERATIVE_MODEL_CONFIG)
     qe, hybrid = initialize_query_engine(index)
     choice = ""
 
+    # Main Loop
     while choice not in {"Exit", "exit"}:
         choice = input(
             "> MAA Assistant: Hello, what would you like to do? "
@@ -200,3 +191,7 @@ if __name__ == "__main__":
             print("> MAA Assistant: Goodbye!")
         else:
             print("> MAA Assistant: Invalid choice. Please try again.")
+
+
+if __name__ == "__main__":
+    main()
