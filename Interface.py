@@ -64,7 +64,6 @@ def load_index():
 
 
 def initialize_query_engine(index):
-
     print("Docstore keys:", len(index.docstore.docs))
     hybrid = HybridRetriever(
         vec_retriever = VectorIndexRetriever(
@@ -152,7 +151,6 @@ def ask_question(query_engine, hybrid, question: str, see_results):
         print("> MAA Assistant: Sorry, I don't have an answer for that")
 
     print(f"> MAA Assistant: Generation took {gen_time:.2f}s")
-    print(f"> MAA Assistant: Total time {total_time:.2f}s")
 
 
 def main():

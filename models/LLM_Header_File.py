@@ -7,7 +7,8 @@ import torch
 from llama_index.core import QueryBundle
 from llama_index.core.schema import NodeWithScore
 from llama_index.core.base.base_retriever import BaseRetriever
-from config import MIXED_TOP_K, MAX_NEW_TOKENS, CONTEXT_WINDOW, MODEL_DO_SAMPLE, MODEL_TEMPERATURE, MODEL_TOP_P
+from llama_index.core.base.llms.types import MessageRole
+from config import MIXED_TOP_K, MAX_NEW_TOKENS, CONTEXT_WINDOW, MODEL_DO_SAMPLE, MODEL_TEMPERATURE, MODEL_TOP_P, REPETITION_PENALTY, SYSTEM_TEMPLATE
 
 
 class HuggingFaceLLM(CustomLLM):
@@ -76,6 +77,8 @@ class HuggingFaceLLM(CustomLLM):
             temperature=temperature,
             top_p=top_p,
             do_sample=do_sample,
+            eos_token_id=self._tokenizer.eos_token_id, #supposed to help stop cleanly, not in original and may remove if errors
+            pad_token_id=self._tokenizer.pad_token_id, 
         )
 
     @property
@@ -86,7 +89,7 @@ class HuggingFaceLLM(CustomLLM):
             model_name="local-hf-seq2seq" if self._is_seq2seq else "local-hf-causal",
             context_window=ctx,
             num_output=self._gen_defaults["max_new_tokens"],
-            is_chat_model=False,
+            is_chat_model=True, # if true, uses chat() instead of complete(). Phi better suited to chat so later fix
             is_function_calling_model=False,
         )
 
@@ -98,6 +101,7 @@ class HuggingFaceLLM(CustomLLM):
             clean.setdefault(k, v)
 
         clean.setdefault("truncation", True)
+        clean.setdefault("repetition_penalty", REPETITION_PENALTY) #added, can be removed if errors
 
         if not self._is_seq2seq:
             clean.setdefault("return_full_text", False)
@@ -125,21 +129,47 @@ class HuggingFaceLLM(CustomLLM):
             output_ids = self._model.generate(**inputs, **gen_kwargs)
 
         return self._tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    
 
     def _generate_text(self, prompt: str, params: Dict[str, Any]) -> str:
         if self._is_seq2seq:
-            return self._generate_seq2seq(prompt, params)
+            out = self._generate_seq2seq(prompt, params)
+            self._debug_preview("seq2seq output", out)
+            return out
 
         if self._generator is None:
             raise RuntimeError("Causal model generator was not initialized.")
 
-        return self._generator(prompt, **params)[0]["generated_text"]
+        raw = self._generator(prompt, **params)
+
+        try:
+            text = raw[0]["generated_text"]
+        except Exception as e:
+            print("[DEBUG] failed to parse pipeline output:", e)
+            raise
+
+        return text
+
 
     @llm_completion_callback()
     def complete(self, prompt: str, **kwargs: Any) -> CompletionResponse:
         params = self._apply_defaults(kwargs)
+
+        if not self._is_seq2seq:
+            hf_messages = [
+                {"role": "system", "content": SYSTEM_TEMPLATE},
+                {"role": "user", "content": prompt},
+            ]
+            prompt = self._tokenizer.apply_chat_template(
+                hf_messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+
         out = self._generate_text(prompt, params)
-        return CompletionResponse(text=out)
+        resp = CompletionResponse(text=out)
+        return resp
+    
 
     @llm_completion_callback()
     def stream_complete(self, prompt: str, **kwargs: Any):
@@ -151,28 +181,47 @@ class HuggingFaceLLM(CustomLLM):
             buf += ch
             yield CompletionResponse(text=buf, delta=ch)
 
+
     def _format_chat(self, messages: Sequence[ChatMessage]) -> str:
-        system_parts = [m.content for m in messages if m.role == "system"]
+        hf_messages = []
 
-        system = f"System: {system_parts[-1]}\n" if system_parts else ""
-        history = ""
+        # Check if system message already exists
+        has_system = any(
+            (m.role.value if hasattr(m.role, "value") else str(m.role)) == "system"
+            for m in messages
+        )
 
-        for m in messages[:-1]:
-            if m.role == "user":
-                history += f"User: {m.content}\n"
-            elif m.role == "assistant":
-                history += f"Assistant: {m.content}\n"
+        # Inject system prompt if missing
+        if not has_system:
+            hf_messages.append({
+                "role": "system",
+                "content": SYSTEM_TEMPLATE
+            })
 
-        last = messages[-1].content if messages else ""
-        prompt = f"{system}{history}User: {last}\nAssistant:"
+        # Add all existing messages
+        for m in messages:
+            role = m.role.value if hasattr(m.role, "value") else str(m.role)
+            hf_messages.append({
+                "role": role,
+                "content": m.content
+            })
+
+        prompt = self._tokenizer.apply_chat_template(
+            hf_messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+
         return prompt
+
 
     @llm_chat_callback()
     def chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
         prompt = self._format_chat(messages)
         params = self._apply_defaults(kwargs)
         out = self._generate_text(prompt, params)
-        return ChatResponse(content=out)
+        return ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content=out))
+
 
     @llm_chat_callback()
     def stream_chat(self, messages: Sequence[ChatMessage], **kwargs: Any):
@@ -183,7 +232,7 @@ class HuggingFaceLLM(CustomLLM):
         buf = ""
         for ch in full:
             buf += ch
-            yield ChatResponse(content=buf, delta=ch)
+            yield ChatResponse(message=ChatMessage(role=MessageRole.ASSISTANT, content=buf),delta=ch,)
 
 
 # -----------------------------
