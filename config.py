@@ -15,8 +15,9 @@ COLLECTION_NAME = "test_store"
 STORED_FILES_PATH = BASE_DIR / "setup_index" / "stored_files.json"
 DEFAULT_MAX_UPSERT_FILES = 20
 DOCS_STORE = STORAGE_DIR / "docstore.json"
-WPD_PATH = ???
+WPD_PATH = BASE_DIR / "wpd_support" / "wpd2text" / "wpd2text.exe"
 
+ACCEPTED_FILE_TYPES = {".pdf", ".wpd"}
 
 # Model Paths
 MODEL_PATH = BASE_DIR / "models" / "ai_models"
@@ -39,6 +40,7 @@ CHUNK_OVERLAP = 100
 # Retrieval
 SIMILARITY_TOP_K = 25 # Testing with 25 and 40 to see if recall is better
 MIXED_TOP_K = 40 # boosting to 40/40/60 makes it take twice as long
+SCORE_RATIO = 0.85 # keep nodes that are at least 85% as good as first node
 
 # MISC
 PHYSICAL_CORES = psutil.cpu_count(logical=False)
@@ -83,26 +85,27 @@ GENERATIVE_MODEL_CONFIG = {
 QA_TEMPLATE = PromptTemplate(
     "Context:\n{context_str}\n\n"
     "Question: {query_str}\n\n"
-    "When speifically requested, identify the specific rate, ship, ship class, year range, shipyard, and place mentioned in the context.\n"
+    "Instructions:\n"
+    "- Answer using only the provided context.\n"
+    "- Do not use outside knowledge.\n"
+    "- If the question asks about a specific job, rate, ship, ship class, year range, shipyard, or place, only report exact or clearly supported matches from the context.\n"
+    "- Do not infer that a job, rate, ship, or exposure is present unless it is explicitly stated or clearly supported in the context.\n"
+    "- If a document is identified by an internal job number in its title, treat that title as part of the evidence.\n"
+    "- If the context does not contain the answer, say exactly: I cannot find this in the documents.\n\n"
     "Answer:"
 )
 
 SYSTEM_TEMPLATE = (
     "You are a document analysis assistant.\n"
-    "Your task is to extract and summarize information strictly from the provided context.\n\n"
-    
-    "The documents may contain information about asbestos, mesothelioma, or other health-related topics.\n"
-    "You are NOT providing medical advice.\n"
-    "You are ONLY reporting what is explicitly written in the documents.\n\n"
-    
+    "Your task is to answer questions strictly from the provided document context.\n\n"
     "Rules:\n"
-    "- Use ONLY the provided context\n"
-    "- Do NOT use outside knowledge\n"
-    "- When analyzing documents, pay special attention to exact references to naval rates, ships, ship classes, year ranges, shipyards, and places.\n"
-    "- When requested, clearly preserve distinctions between exact matches, partial matches, and unrelated entries.\n"
-    "- Do NOT refuse unless the context is missing\n"
-    "- If the answer is not in the context, say exactly:\n"
-    "\"I cannot find this in the documents.\"\n"
+    "- Use only the provided context.\n"
+    "- Do not use outside knowledge.\n"
+    "- Report only what is explicitly stated or clearly supported in the context.\n"
+    "- For questions about a specific job, rate, ship, ship class, year range, shipyard, or place, treat the exact requested term as critical.\n"
+    "- Do not substitute related occupations or make unsupported connections.\n"
+    "- Preserve distinctions between exact matches, partial matches, and unrelated entries when relevant.\n"
+    "- If the answer is not in the context, say exactly: I cannot find this in the documents.\n"
 )
 
 # add configs for the response synth and retrievers

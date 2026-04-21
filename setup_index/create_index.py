@@ -8,7 +8,7 @@ from llama_index.core import VectorStoreIndex
 from setup_index.feed_documents_upsert import feed_documents
 from setup_index.doc_embed_store import doc_embed_store
 from setup_index.file_utils import get_source_id
-from config import DOCS_DIR, STORED_FILES_PATH, DEFAULT_MAX_UPSERT_FILES
+from config import DOCS_DIR, STORED_FILES_PATH, DEFAULT_MAX_UPSERT_FILES, ACCEPTED_FILE_TYPES
 
 
 # Gets the state of each file, such as path, source id, size, and last edit time
@@ -92,7 +92,7 @@ def parse_documents(root_path: str | Path, json_path: Path = STORED_FILES_PATH) 
             break
         if not path.is_file():
             continue
-        if path.suffix.lower() != ".pdf":
+        if path.suffix.lower() not in ACCEPTED_FILE_TYPES:
             continue
         try:
             curr_doc = get_file_state(path, root)

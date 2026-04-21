@@ -12,7 +12,7 @@ from pdf2image import convert_from_path
 from PIL import ImageOps
 import subprocess
 from setup_index.file_utils import get_source_id
-from config import DOCS_DIR, OCR_MAX_WORKERS, OCR_THREAD_COUNT, WPD_PATH,
+from config import DOCS_DIR, OCR_MAX_WORKERS, OCR_THREAD_COUNT, WPD_PATH
 
 
 def preprocess_for_ocr(img):
@@ -34,6 +34,20 @@ def fix_pipe_pronoun_I(text: str) -> str:
     text = re.sub(r"(?<=\s)\|\s*(?=[A-Za-z])", "I ", text)
     text = re.sub(r"(?<=\S)\s*\|\s*(?=\s|$)", " I", text)
     return text
+
+
+def extract_job_number(title: str, text: str = "") -> str | None:
+    JOB_RE = re.compile(r"\b([A-Z]\d{3,})\b", re.IGNORECASE)
+
+    m = JOB_RE.search(title)
+    if m:
+        return m.group(1).upper()
+
+    m = JOB_RE.search(text[:2000])
+    if m:
+        return m.group(1).upper()
+
+    return None
 
 
 class HybridPDFReader(BaseReader):
@@ -103,19 +117,24 @@ class HybridPDFReader(BaseReader):
         source_id = get_source_id(file, self._docs_root)
         filename = os.path.basename(file)
         title = os.path.splitext(filename)[0]
+
+        combined_text = "\n".join(pages_text[:3])
+        job_num = extract_job_number(title, combined_text)
+
         doc_type = "report" if "report" in title.lower() else "research_document"
 
         docs: List[Document] = []
-        for i, text in enumerate(pages_text, start=1):
+        for i, page_text in enumerate(pages_text, start=1):
             docs.append(
                 Document(
-                    text=text,
+                    text=page_text,
                     metadata={
                         **extra_info,
                         "file_path": str(Path(file).resolve()),
                         "page": i,
                         "source": source,
                         "title": title,
+                        "job_number": job_num,
                         "doc_type": doc_type,
                         "source_id": source_id,
                     },
@@ -132,7 +151,7 @@ def clean_plain_text(text: str) -> str:
 class WPDReader(BaseReader):
     def __init__(
         self,
-        wpd2text_path: str = r"C:\path\to\wpd2text.exe",
+        wpd2text_path: str | Path = WPD_PATH,
         docs_root: str | Path = DOCS_DIR,
     ):
         self._wpd2text_path = Path(wpd2text_path)
@@ -171,6 +190,7 @@ class WPDReader(BaseReader):
         source_id = get_source_id(file, self._docs_root)
         filename = os.path.basename(file)
         title = os.path.splitext(filename)[0]
+        job_num = extract_job_number(title, text)
         doc_type = "report" if "report" in title.lower() else "research_document"
 
         return [
@@ -182,6 +202,7 @@ class WPDReader(BaseReader):
                     "page": 1,
                     "source": "wpd_text",
                     "title": title,
+                    "job_number":job_num,
                     "doc_type": doc_type,
                     "source_id": source_id,
                 },

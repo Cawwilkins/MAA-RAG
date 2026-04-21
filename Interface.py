@@ -2,7 +2,7 @@ from pathlib import Path
 import qdrant_client
 import torch
 import time
-from typing import List, Set, Dict
+from typing import List, Set, Dict, Optional
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.core import (
@@ -16,12 +16,13 @@ from llama_index.core.storage import StorageContext
 from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.postprocessor import LongContextReorder, SentenceTransformerRerank
+from llama_index.core.postprocessor.types import BaseNodePostprocessor
 from llama_index.core.schema import NodeWithScore
 from llama_index.core.base.base_retriever import BaseRetriever
 from llama_index.core.prompts import PromptTemplate
 from models.LLM_Header_File import HuggingFaceLLM, HybridRetriever
 from setup_index.create_index import create_index
-from config import EMBED_MODEL_CONFIG, DB_DIR, STORAGE_DIR, DOCS_DIR, COLLECTION_NAME, INDEX_ID, QA_TEMPLATE, RERANK_MODEL_CONFIG, GENERATIVE_MODEL_CONFIG, SIMILARITY_TOP_K, MIXED_TOP_K
+from config import EMBED_MODEL_CONFIG, DB_DIR, STORAGE_DIR, DOCS_DIR, COLLECTION_NAME, INDEX_ID, QA_TEMPLATE, RERANK_MODEL_CONFIG, GENERATIVE_MODEL_CONFIG, SIMILARITY_TOP_K, MIXED_TOP_K, SCORE_RATIO, DOCS_STORE
 
 
 def show_nodes(nodes, show_score=True):
@@ -34,7 +35,8 @@ def show_nodes(nodes, show_score=True):
         if (show_score): print("Score: ", getattr(node, "score", None))
         print("Node Information:")
         print("Title:", meta.get("title"))
-        print("OCR or Text-Based PDF:", meta.get("source"))
+        print("Job Number:", meta.get("job_number"))
+        print("Type of Document:", meta.get("source"))
         print("File Path:", meta.get("file_path"))
         print("Document Page #:", meta.get("page"))
         print("   Text_preview:", repr(text))
@@ -45,8 +47,8 @@ def load_index():
     storage_dir = STORAGE_DIR
 
     # Check if the storage exists and if not, create a new one
-    if not storage_dir.exists():
-        print("No vector db found, creating a new one...")
+    if not storage_dir.exists() or not DOCS_STORE.exists():
+        print("No valid persisted vector db found, creating a new one...")
         create_index(DOCS_DIR)
         return load_index()
 
@@ -62,6 +64,42 @@ def load_index():
     index = load_index_from_storage(storage_context, index_id=INDEX_ID)
     return index
 
+
+class ScoreThresholdFilter(BaseNodePostprocessor):
+    ratio: float = SCORE_RATIO
+    debug: bool = True
+
+    def _postprocess_nodes(
+        self,
+        nodes: List[NodeWithScore],
+        query_bundle: Optional[QueryBundle] = None,
+    ) -> List[NodeWithScore]:
+        if not nodes:
+            return nodes
+
+        nodes = sorted(nodes, key=lambda x: x.score or 0, reverse=True)
+        top_score = nodes[0].score or 0
+        threshold = top_score * self.ratio
+
+        if self.debug:
+            print("\n--- BEFORE FILTER ---")
+            for i, node in enumerate(nodes):
+                print(f"{i+1}. score={node.score}")
+
+        filtered = [
+            node for node in nodes
+            if node.score is not None and node.score >= threshold
+        ]
+
+        if self.debug:
+            print(f"\nThreshold: {threshold}")
+            print("--- AFTER FILTER ---")
+            for i, node in enumerate(filtered):
+                print(f"{i+1}. score={node.score}")
+            print(f"Kept {len(filtered)} / {len(nodes)} nodes\n")
+
+        return filtered if filtered else nodes[:1]
+    
 
 def initialize_query_engine(index):
     print("Docstore keys:", len(index.docstore.docs))
@@ -94,6 +132,7 @@ def initialize_query_engine(index):
         response_synthesizer = synthesizer,
         node_postprocessors = [
             SentenceTransformerRerank(**RERANK_MODEL_CONFIG),
+            ScoreThresholdFilter(ratio=SCORE_RATIO),
             LongContextReorder(),
         ]
     )

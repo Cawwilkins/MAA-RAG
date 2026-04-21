@@ -48,6 +48,31 @@ def debug_print_nodes(nodes, n: int = 3) -> None:
                 print(f"  {rk}: {rid[:120]}")
 
 
+def prepend_key_metadata_to_nodes(nodes, **kwargs):
+    for node in nodes:
+        meta = getattr(node, "metadata", {}) or {}
+
+        title = meta.get("title")
+        job_number = meta.get("job_number")
+        page = meta.get("page")
+        source = meta.get("source", "")
+
+        header_parts = []
+        if title:
+            header_parts.append(f"Document title: {title}")
+        if job_number:
+            header_parts.append(f"Job number: {job_number}")
+
+        # Only include page for PDFs
+        if page is not None and source in {"pdf_text", "ocr_pdf"}:
+            header_parts.append(f"Page: {page}")
+
+        if header_parts:
+            header = "\n".join(header_parts) + "\n\n"
+            node.text = header + node.text
+
+    return nodes
+
 # Delete existing nodes whos id matches incoming ID
 def delete_old_docstore_nodes(storage_context: StorageContext, source_ids_to_replace: set[str]) -> None:
     """
@@ -178,6 +203,7 @@ def doc_embed_store(docs: list[Document]) -> VectorStoreIndex | None:
 
         # Transform chunks into nodes
         nodes = pipeline.run(documents=docs)
+        nodes = prepend_key_metadata_to_nodes(nodes)
 
         debug_print_nodes(nodes, n=5)
         print(f"✅ Pipeline completed. Generated {len(nodes)} nodes.")
