@@ -56,12 +56,15 @@ def prepend_key_metadata_to_nodes(nodes, **kwargs):
         job_number = meta.get("job_number")
         page = meta.get("page")
         source = meta.get("source", "")
+        primary_ship = meta.get("primary_ship")
 
         header_parts = []
         if title:
             header_parts.append(f"Document title: {title}")
         if job_number:
             header_parts.append(f"Job number: {job_number}")
+        if primary_ship:
+            header_parts.append(f"Ship: {primary_ship}")
 
         # Only include page for PDFs
         if page is not None and source in {"pdf_text", "ocr_pdf"}:

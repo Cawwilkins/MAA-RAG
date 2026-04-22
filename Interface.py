@@ -30,16 +30,48 @@ def show_nodes(nodes, show_score=True):
         text = getattr(node, "text", "") or ""
         meta = getattr(node, "metadata", {}) or {}
 
-        # Print the metadata you care about (safe .get calls)
         print(f"\n--- Node {i + 1} ---")
-        if (show_score): print("Score: ", getattr(node, "score", None))
+
+        if show_score:
+            print("Score:", getattr(node, "score", None))
+
         print("Node Information:")
+
+        # --- Core file info ---
         print("Title:", meta.get("title"))
-        print("Job Number:", meta.get("job_number"))
-        print("Type of Document:", meta.get("source"))
         print("File Path:", meta.get("file_path"))
-        print("Document Page #:", meta.get("page"))
-        print("   Text_preview:", repr(text))
+        print("Page:", meta.get("page"))
+        print("Source:", meta.get("source"))
+        print("Source Quality:", meta.get("source_quality"))
+        print("Doc Type:", meta.get("doc_type"))
+        print("Source ID:", meta.get("source_id"))
+
+        # --- Case-specific ---
+        print("Job Number:", meta.get("job_number"))
+
+        # --- Ships ---
+        print("Primary Ship:", meta.get("primary_ship"))
+        print("Ships Mentioned:", meta.get("ships"))
+
+        # --- Ship Classes ---
+        print("Primary Ship Class:", meta.get("primary_ship_class"))
+        print("Ship Classes Mentioned:", meta.get("ship_classes_mentioned"))
+
+        # --- Years ---
+        print("Primary Year Range:", meta.get("primary_year_range"))
+        print("Years Mentioned:", meta.get("years_mentioned"))
+
+        # --- Rates ---
+        print("Primary Rate:", meta.get("primary_rate"))
+        print("Rates Mentioned:", meta.get("rates_mentioned"))
+
+        # --- Shipyards ---
+        print("Primary Shipyard:", meta.get("primary_shipyard"))
+        print("Shipyards Mentioned:", meta.get("shipyards_mentioned"))
+
+        # --- Text preview ---
+        print("\nText Preview:")
+        print(repr(text[:500]))  # truncate so logs don't explode
 
 
 # Creates an index if one doesnt exist, opens existing index and vector store
