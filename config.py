@@ -108,59 +108,21 @@ SYSTEM_TEMPLATE = (
     "- If the answer is not in the context, say exactly: I cannot find this in the documents.\n"
 )
 
+#MetaData Extraction: 
+EXTRACT_TEXT_WINDOW = 5000
+EXTRACT_JOB_WINDOW = 2000
+MAX_VALID_YEAR = 1999
+MIN_VALID_YEAR = 1800
 
-# Metadata
-{
-    "source_id": str, #done
-    "file_path": str, #done
-    "title": str | None, #done
-    "source": str | None, #done
-    "page": int | None, #done
-    "doc_type": str | None, #done
-    "source_quality": str | None, #done
-
-    "job_number": str | None, #done
-    #"plaintiff_name": str | None,
-
-    "ships": list[str], #done
-    "primary_ship": str | None, #done
-
-    "rates_mentioned": list[str], #done
-    "primary_rate": str | None, #done
-
-    "years_mentioned": list[int], #done
-    "primary_year_range": str | None, #done
-
-    "shipyard": str | None,
-    "ship_classes": tuple | None, #done
-    "primary_ship_class": str | None #done
-}
-
-#finish metadata, then do header
-#do headers based on important stuff and confidence
-#abstract helpers for metadata into separate file
+# Do Header, filter by metadata (json file)
 
 #can later filter by metadata so will be important to add as much metadata as possible
 # only include in header very important info bc ikts visitble to llm
-# Header should have
-## - Doc Title: Z321 - Bobby Work Hist  
-## - Job Number: Z321
-## - Plaintiff Rate: Fireman
-## - Primary Ship: USS Enterprise
-## - Primary Year range: 1943-1945
-## - Page for pdf only: 7
 
-# MetaData
-# - Above and below
-## - plaintiff_name
-## - rates_mentioned
-## - ships
-## - year_ranges or at least years_mentioned
-## - shipyard
-## - ship_class
-## - place
-## - Doc_type: "report" memorandum, deck log, milspec, cruise-book, other
-## - Source_quality, digital ocr_clean ocr_noisy
+#strugglnig to answer about the memos, when given job numbers
+# need to expand window to more than just first 5k chars for metadata bc shipyards getting cut
+#Can we see which nodes after filter are being returned
+#keeps saying cant find in docs, assuming this is because of header or metadata added
 
 #preingecting into embedded text - better recall but what if have to redo later, embeddings will need to be redone
 #inject at retrieval - safer for future and not having to redo embeddings

@@ -26,6 +26,10 @@ from config import EMBED_MODEL_CONFIG, DB_DIR, STORAGE_DIR, DOCS_DIR, COLLECTION
 
 
 def show_nodes(nodes, show_score=True):
+    def print_if_exists(label, value):
+        if value is not None and value != []:
+            print(f"{label}: {value}")
+
     for i, node in enumerate(nodes[:5]):
         text = getattr(node, "text", "") or ""
         meta = getattr(node, "metadata", {}) or {}
@@ -33,45 +37,47 @@ def show_nodes(nodes, show_score=True):
         print(f"\n--- Node {i + 1} ---")
 
         if show_score:
-            print("Score:", getattr(node, "score", None))
+            score = getattr(node, "score", None)
+            if score is not None:
+                print("Score:", score)
 
         print("Node Information:")
 
         # --- Core file info ---
-        print("Title:", meta.get("title"))
-        print("File Path:", meta.get("file_path"))
-        print("Page:", meta.get("page"))
-        print("Source:", meta.get("source"))
-        print("Source Quality:", meta.get("source_quality"))
-        print("Doc Type:", meta.get("doc_type"))
-        print("Source ID:", meta.get("source_id"))
+        print_if_exists("Title is", meta.get("title"))
+        print_if_exists("File Path is", meta.get("file_path"))
+        print_if_exists("Page is", meta.get("page"))
+        print_if_exists("Source is", meta.get("source"))
+        print_if_exists("Source Quality is", meta.get("source_quality"))
+        print_if_exists("Doc Type is", meta.get("doc_type"))
+        print_if_exists("Source ID is", meta.get("source_id"))
 
         # --- Case-specific ---
-        print("Job Number:", meta.get("job_number"))
+        print_if_exists("Job Number is", meta.get("job_number"))
 
         # --- Ships ---
-        print("Primary Ship:", meta.get("primary_ship"))
-        print("Ships Mentioned:", meta.get("ships"))
+        print_if_exists("Primary Ship is", meta.get("primary_ship"))
+        print_if_exists("Ships Mentioned are", meta.get("ships"))
 
         # --- Ship Classes ---
-        print("Primary Ship Class:", meta.get("primary_ship_class"))
-        print("Ship Classes Mentioned:", meta.get("ship_classes_mentioned"))
+        print_if_exists("Primary Ship Class is", meta.get("primary_ship_class"))
+        print_if_exists("Ship Classes Mentioned are", meta.get("ship_classes"))
 
         # --- Years ---
-        print("Primary Year Range:", meta.get("primary_year_range"))
-        print("Years Mentioned:", meta.get("years_mentioned"))
+        print_if_exists("Primary Year Range is", meta.get("primary_year_range"))
+        print_if_exists("Years Mentioned are", meta.get("years_mentioned"))
 
         # --- Rates ---
-        print("Primary Rate:", meta.get("primary_rate"))
-        print("Rates Mentioned:", meta.get("rates_mentioned"))
+        print_if_exists("Primary Rate is", meta.get("primary_rate"))
+        print_if_exists("Rates Mentioned", meta.get("rates_mentioned"))
 
         # --- Shipyards ---
-        print("Primary Shipyard:", meta.get("primary_shipyard"))
-        print("Shipyards Mentioned:", meta.get("shipyards_mentioned"))
+        print_if_exists("Primary Shipyard is", meta.get("primary_shipyard"))
+        print_if_exists("Shipyards Mentioned are", meta.get("shipyards_mentioned"))
 
         # --- Text preview ---
-        print("\nText Preview:")
-        print(repr(text[:500]))  # truncate so logs don't explode
+        print("\nNode Content:")
+        print(text)
 
 
 # Creates an index if one doesnt exist, opens existing index and vector store
