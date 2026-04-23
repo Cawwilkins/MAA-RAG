@@ -25,6 +25,48 @@ from setup_index.create_index import create_index
 from config import EMBED_MODEL_CONFIG, DB_DIR, STORAGE_DIR, DOCS_DIR, COLLECTION_NAME, INDEX_ID, QA_TEMPLATE, RERANK_MODEL_CONFIG, GENERATIVE_MODEL_CONFIG, SIMILARITY_TOP_K, MIXED_TOP_K, SCORE_RATIO, DOCS_STORE
 
 
+def debug_final_context(query_engine, nodes, question: str):
+    """
+    Applies postprocessors to nodes and prints the exact context
+    that will be sent to the LLM.
+    
+    Returns:
+        processed_nodes (list): nodes after postprocessing
+    """
+
+    query_bundle = QueryBundle(query_str=question)
+
+    # Apply postprocessors (same order as query_engine)
+    postprocessors = getattr(query_engine, "_node_postprocessors", [])
+    for postprocessor in postprocessors:
+        nodes = postprocessor.postprocess_nodes(
+            nodes,
+            query_bundle=query_bundle,
+        )
+
+    print("\n====== FINAL CONTEXT SENT TO LLM ======\n")
+
+    full_context = ""
+
+    for i, node in enumerate(nodes):
+        text = getattr(node, "text", "") or ""
+        score = getattr(node, "score", None)
+
+        print(f"\n--- Node {i+1} ---")
+        print("Score:", score)
+        print(text)
+
+        full_context += text + "\n\n"
+
+    print("\n====== CONTEXT STATS ======")
+    print("Num nodes:", len(nodes))
+    print("Total characters:", len(full_context))
+    print("Approx tokens:", len(full_context) // 4)
+    print("====================================\n")
+
+    return nodes
+
+
 def show_nodes(nodes, show_score=True):
     def print_if_exists(label, value):
         if value is not None and value != []:
@@ -56,23 +98,18 @@ def show_nodes(nodes, show_score=True):
         print_if_exists("Job Number is", meta.get("job_number"))
 
         # --- Ships ---
-        print_if_exists("Primary Ship is", meta.get("primary_ship"))
         print_if_exists("Ships Mentioned are", meta.get("ships"))
 
         # --- Ship Classes ---
-        print_if_exists("Primary Ship Class is", meta.get("primary_ship_class"))
         print_if_exists("Ship Classes Mentioned are", meta.get("ship_classes"))
 
         # --- Years ---
-        print_if_exists("Primary Year Range is", meta.get("primary_year_range"))
         print_if_exists("Years Mentioned are", meta.get("years_mentioned"))
 
         # --- Rates ---
-        print_if_exists("Primary Rate is", meta.get("primary_rate"))
         print_if_exists("Rates Mentioned", meta.get("rates_mentioned"))
 
         # --- Shipyards ---
-        print_if_exists("Primary Shipyard is", meta.get("primary_shipyard"))
         print_if_exists("Shipyards Mentioned are", meta.get("shipyards_mentioned"))
 
         # --- Text preview ---
@@ -189,9 +226,9 @@ def ask_question(query_engine, hybrid, question: str, see_results):
     print("> MAA Assistant: Retrieving relevant information...")
     retrieval_start = time.time()
 
-    semantic_nodes = hybrid._vec.retrieve(question)
-    keyword_nodes = hybrid._bm25.retrieve(question)
-    hybrid_nodes = hybrid.retrieve(question)
+    semantic_nodes = hybrid._vec.retrieve(QueryBundle(query_str=question))
+    keyword_nodes = hybrid._bm25.retrieve(QueryBundle(query_str=question))
+    hybrid_nodes = hybrid.retrieve(QueryBundle(query_str=question))
 
     retrieval_time = time.time() - retrieval_start
 
@@ -217,7 +254,10 @@ def ask_question(query_engine, hybrid, question: str, see_results):
     print("> MAA Assistant: Working on response...")
     gen_start = time.time()
 
+    #debug_final_context(query_engine, hybrid_nodes, question: str)
+
     response = query_engine.query(question)
+
 
     gen_time = time.time() - gen_start
     total_time = time.time() - total_start

@@ -8,7 +8,12 @@ from llama_index.core import VectorStoreIndex
 from setup_index.feed_documents_upsert import feed_documents
 from setup_index.doc_embed_store import doc_embed_store
 from setup_index.file_utils import get_source_id
-from config import DOCS_DIR, STORED_FILES_PATH, DEFAULT_MAX_UPSERT_FILES, ACCEPTED_FILE_TYPES
+from setup_index.update_metadata_facets import (
+    initialize_empty_metadata_files,
+    update_metadata_facets_for_files,
+)
+from config import DOCS_DIR, STORED_FILES_PATH, DEFAULT_MAX_UPSERT_FILES, ACCEPTED_FILE_TYPES, METADATA_FACETS_PATH, METADATA_SOURCE_CONTRIBUTIONS_PATH
+
 
 
 # Gets the state of each file, such as path, source id, size, and last edit time
@@ -60,7 +65,10 @@ def file_state_changed(old_state: dict[str, Any], new_state: dict[str, Any]) -> 
 
 
 # Parses docs in given path, checks if they need to be added to store, if so adds to list of files to be inserted
-def parse_documents(root_path: str | Path, json_path: Path = STORED_FILES_PATH) -> list[str]:
+def parse_documents(
+    root_path: str | Path,
+    json_path: Path = STORED_FILES_PATH,
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
     # Took .02 seconds with 41 docs, meaning took that long to compile list of docs to be added
     parse_start = time.perf_counter()
 
@@ -129,7 +137,7 @@ def parse_documents(root_path: str | Path, json_path: Path = STORED_FILES_PATH) 
     parse_elapsed = time.perf_counter() - parse_start
     print(f"parse_documents took {parse_elapsed:.2f} seconds")
 
-    return files_to_upsert
+    return files_to_upsert, stored_files
 
 
 # Runs the parser, feeds docs, and upserts to doc store
@@ -138,7 +146,12 @@ def create_index(filepath: str | Path) -> VectorStoreIndex | None:
 
     try:
         print("About to parse through documents...")
-        files_to_upsert = parse_documents(filepath)
+        initialize_empty_metadata_files(
+            METADATA_FACETS_PATH,
+            METADATA_SOURCE_CONTRIBUTIONS_PATH,
+        )
+
+        files_to_upsert, stored_files = parse_documents(filepath)
 
         if not files_to_upsert:
             total_elapsed = time.perf_counter() - total_start
@@ -152,14 +165,23 @@ def create_index(filepath: str | Path) -> VectorStoreIndex | None:
 
         load_start = time.perf_counter()
         print("About to feed documents")
-        documents = feed_documents(files_to_upsert, docs_root=filepath)
+        documents, rich_metadata_map = feed_documents(files_to_upsert, docs_root=filepath)
         load_elapsed = time.perf_counter() - load_start
         print(f"feed_documents took {load_elapsed:.2f} seconds")
 
         try:
             print("Embedding and storing documents...")
             embed_start = time.perf_counter()
-            index = doc_embed_store(documents)
+            index = doc_embed_store(documents, rich_metadata_map)
+            update_metadata_facets_for_files(
+                rich_metadata_map=rich_metadata_map,
+                files_to_upsert=files_to_upsert,
+                docs_root=filepath,
+                stored_files=stored_files,
+                stored_files_path=STORED_FILES_PATH,
+                facets_path=METADATA_FACETS_PATH,
+                source_contributions_path=METADATA_SOURCE_CONTRIBUTIONS_PATH,
+            )
             embed_elapsed = time.perf_counter() - embed_start
             print(f"doc_embed_store took {embed_elapsed:.2f} seconds")
 

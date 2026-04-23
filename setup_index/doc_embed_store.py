@@ -9,6 +9,7 @@ from llama_index.core.node_parser import SentenceSplitter
 import traceback
 import qdrant_client
 from config import INDEX_ID, DB_DIR, STORAGE_DIR, EMBED_MODEL_CONFIG, COLLECTION_NAME, DOCS_STORE, SENTENCE_SPLITTER_CONFIG
+from setup_index.feed_documents_upsert import reattach_rich_metadata_to_nodes
 
 # Hard-force offline mode
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -54,21 +55,12 @@ def prepend_key_metadata_to_nodes(nodes, **kwargs):
 
         title = meta.get("title")
         job_number = meta.get("job_number")
-        page = meta.get("page")
-        source = meta.get("source", "")
-        primary_ship = meta.get("primary_ship")
 
         header_parts = []
         if title:
             header_parts.append(f"Document title: {title}")
         if job_number:
-            header_parts.append(f"Job number: {job_number}")
-        if primary_ship:
-            header_parts.append(f"Ship: {primary_ship}")
-
-        # Only include page for PDFs
-        if page is not None and source in {"pdf_text", "ocr_pdf"}:
-            header_parts.append(f"Page: {page}")
+            header_parts.append(f"Job {job_number}")
 
         if header_parts:
             header = "\n".join(header_parts) + "\n\n"
@@ -129,7 +121,7 @@ def delete_old_qdrant_points(client: qdrant_client.QdrantClient, source_ids_to_r
 
 
 # Embeds documents and adds them to vector store
-def doc_embed_store(docs: list[Document]) -> VectorStoreIndex | None:
+def doc_embed_store(docs: list[Document], rich_metadata_map: dict[tuple[str, int], dict],) -> VectorStoreIndex | None:
     Settings.llm = None
     embed_model = HuggingFaceEmbedding(**EMBED_MODEL_CONFIG)
     Settings.embed_model = embed_model
@@ -206,6 +198,7 @@ def doc_embed_store(docs: list[Document]) -> VectorStoreIndex | None:
 
         # Transform chunks into nodes
         nodes = pipeline.run(documents=docs)
+        nodes = reattach_rich_metadata_to_nodes(nodes, rich_metadata_map)
         nodes = prepend_key_metadata_to_nodes(nodes)
 
         debug_print_nodes(nodes, n=5)

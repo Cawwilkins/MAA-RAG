@@ -1,19 +1,25 @@
 from __future__ import annotations
 import os
 import re
-from typing import List, Optional, Dict, Any
+import subprocess
+from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader
 from pypdf import PdfReader
 import pytesseract
 from pdf2image import convert_from_path
 from PIL import ImageOps
-import subprocess
+
 from setup_index.file_utils import get_source_id
 from config import DOCS_DIR, OCR_MAX_WORKERS, OCR_THREAD_COUNT, WPD_PATH
-from setup_index.metadata_extractors import extract_all_metadata
+from setup_index.one_pass_metadata_extractor import extract_all_metadata
+
+
+RichMetadataKey = Tuple[str, int]
+RichMetadataMap = Dict[RichMetadataKey, Dict[str, Any]]
 
 
 def preprocess_for_ocr(img):
@@ -37,6 +43,63 @@ def fix_pipe_pronoun_I(text: str) -> str:
     return text
 
 
+def clean_plain_text(text: str) -> str:
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+
+def make_rich_metadata_key(source_id: str, page: int) -> RichMetadataKey:
+    return (source_id, page)
+
+
+def build_minimal_metadata(
+    extra_info: Dict[str, Any],
+    title: str,
+    job_number: Optional[str],
+    source_id: str,
+    page: int,
+) -> Dict[str, Any]:
+    """
+    Only the compact metadata needed before chunking/splitting.
+    """
+    return {
+        **extra_info,
+        "title": title,
+        "job_number": job_number,
+        "source_id": source_id,
+        "page": page,
+    }
+
+
+def build_embed_exclusion_list(full_metadata: Dict[str, Any]) -> List[str]:
+    """
+    Keep only title + job_number eligible for embedding metadata injection.
+    Everything else is excluded from embed text.
+    """
+    return [
+        key for key in full_metadata.keys()
+        if key not in {"title", "job_number"}
+    ]
+
+
+def build_rich_metadata_for_storage(
+    metadata_fields: Dict[str, Any],
+    extra_info: Dict[str, Any],
+    source_id: str,
+    page: int,
+) -> Dict[str, Any]:
+    """
+    Full metadata stored outside the Document until after chunking.
+    """
+    return {
+        **extra_info,
+        **metadata_fields,
+        "source_id": source_id,
+        "page": page,
+    }
+
 
 class HybridPDFReader(BaseReader):
     def __init__(
@@ -54,6 +117,8 @@ class HybridPDFReader(BaseReader):
         self._tesseract_lang = tesseract_lang
         self._tesseract_cmd = tesseract_cmd
         self._docs_root = Path(docs_root).resolve()
+        self._rich_metadata_map: RichMetadataMap = {}
+
         pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
     def _native_text(self, file_path: str) -> List[str]:
@@ -84,6 +149,12 @@ class HybridPDFReader(BaseReader):
         with ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as ex:
             return list(ex.map(ocr_one, images))
 
+    def get_rich_metadata_map(self) -> RichMetadataMap:
+        return dict(self._rich_metadata_map)
+
+    def clear_rich_metadata_map(self) -> None:
+        self._rich_metadata_map.clear()
+
     def load_data(
         self,
         file: str,
@@ -107,30 +178,43 @@ class HybridPDFReader(BaseReader):
         file_path = str(Path(file).resolve())
         title = os.path.splitext(filename)[0]
 
-        combined_text = "\n".join(pages_text[:5])
+        combined_text = "\n".join(pages_text)
         metadata_fields = extract_all_metadata(file_path, title, combined_text, source)
-        metadata_fields["source_id"] = source_id
 
         docs: List[Document] = []
+
         for i, page_text in enumerate(pages_text, start=1):
+            # Store rich metadata externally for later reattachment.
+            rich_metadata = build_rich_metadata_for_storage(
+                metadata_fields=metadata_fields,
+                extra_info=extra_info,
+                source_id=source_id,
+                page=i,
+            )
+            self._rich_metadata_map[make_rich_metadata_key(source_id, i)] = rich_metadata
+
+            # Only attach compact metadata before pipeline chunking.
+            minimal_metadata = build_minimal_metadata(
+                extra_info=extra_info,
+                title=title,
+                job_number=metadata_fields.get("job_number"),
+                source_id=source_id,
+                page=i,
+            )
+
+            exclude_from_embed = build_embed_exclusion_list(minimal_metadata)
+
             docs.append(
                 Document(
                     text=page_text,
-                    metadata={
-                        **extra_info,
-                        **metadata_fields,
-                        "page": i,
-                    }
+                    metadata=minimal_metadata,
+                    excluded_embed_metadata_keys=exclude_from_embed,
+                    excluded_llm_metadata_keys=[],
                 )
             )
+
         return docs
 
-
-def clean_plain_text(text: str) -> str:
-    text = re.sub(r"\r\n?", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"[ \t]{2,}", " ", text)
-    return text.strip()
 
 class WPDReader(BaseReader):
     def __init__(
@@ -140,6 +224,7 @@ class WPDReader(BaseReader):
     ):
         self._wpd2text_path = Path(wpd2text_path)
         self._docs_root = Path(docs_root).resolve()
+        self._rich_metadata_map: RichMetadataMap = {}
 
     def _extract_text(self, file_path: str) -> str:
         cmd = [str(self._wpd2text_path), str(Path(file_path).resolve())]
@@ -161,6 +246,12 @@ class WPDReader(BaseReader):
 
         return result.stdout.strip()
 
+    def get_rich_metadata_map(self) -> RichMetadataMap:
+        return dict(self._rich_metadata_map)
+
+    def clear_rich_metadata_map(self) -> None:
+        self._rich_metadata_map.clear()
+
     def load_data(
         self,
         file: str,
@@ -177,19 +268,73 @@ class WPDReader(BaseReader):
         file_path = str(Path(file).resolve())
         source = "wpd_text"
         page = 1
+
         metadata_fields = extract_all_metadata(file_path, title, text, source)
-        metadata_fields["source_id"] = source_id
+
+        rich_metadata = build_rich_metadata_for_storage(
+            metadata_fields=metadata_fields,
+            extra_info=extra_info,
+            source_id=source_id,
+            page=page,
+        )
+        self._rich_metadata_map[make_rich_metadata_key(source_id, page)] = rich_metadata
+
+        minimal_metadata = build_minimal_metadata(
+            extra_info=extra_info,
+            title=title,
+            job_number=metadata_fields.get("job_number"),
+            source_id=source_id,
+            page=page,
+        )
+
+        exclude_from_embed = build_embed_exclusion_list(minimal_metadata)
 
         return [
             Document(
                 text=text,
-                metadata={
-                    **extra_info,
-                    **metadata_fields,
-                    "page": page,
-                }
+                metadata=minimal_metadata,
+                excluded_embed_metadata_keys=exclude_from_embed,
+                excluded_llm_metadata_keys=[],
             )
         ]
+
+
+def reattach_rich_metadata_to_nodes(
+    nodes,
+    rich_metadata_map,
+    overwrite=False,
+):
+    for node in nodes:
+        metadata = getattr(node, "metadata", {}) or {}
+
+        source_id = metadata.get("source_id")
+        page = metadata.get("page")
+
+        if source_id is None or page is None:
+            continue
+
+        rich = rich_metadata_map.get((source_id, int(page)))
+        if not rich:
+            continue
+
+        for key, value in rich.items():
+            if overwrite or key not in metadata:
+                metadata[key] = value
+
+        existing_embed_excluded = set(
+            getattr(node, "excluded_embed_metadata_keys", []) or []
+        )
+        existing_embed_excluded.update(rich.keys())
+        node.excluded_embed_metadata_keys = list(existing_embed_excluded)
+
+        existing_llm_excluded = set(
+            getattr(node, "excluded_llm_metadata_keys", []) or []
+        )
+        existing_llm_excluded.update(rich.keys())
+        node.excluded_llm_metadata_keys = list(existing_llm_excluded)
+
+    return nodes
+
 
 def collect_file_paths(file_paths_to_insert: Optional[list[str | Path]] = None) -> list[Path]:
     if not file_paths_to_insert:
@@ -204,12 +349,14 @@ def collect_file_paths(file_paths_to_insert: Optional[list[str | Path]] = None) 
     return cleaned
 
 
-def feed_documents(file_paths_to_insert: Optional[list[str | Path]] = None, docs_root: str | Path = DOCS_DIR) -> list[Document]:
-    #Took about 56 seconds with 41 docs to read each 
+def feed_documents(
+    file_paths_to_insert: Optional[list[str | Path]] = None,
+    docs_root: str | Path = DOCS_DIR
+) -> tuple[list[Document], RichMetadataMap]:
     paths = collect_file_paths(file_paths_to_insert)
     if not paths:
         print("No valid PDF or WPD files provided to feed_documents.")
-        return []
+        return [], {}
 
     pdf_reader = HybridPDFReader(
         poppler_path=None,
@@ -225,31 +372,25 @@ def feed_documents(file_paths_to_insert: Optional[list[str | Path]] = None, docs
     )
 
     documents: list[Document] = []
+    rich_metadata_map: RichMetadataMap = {}
 
     for path in paths:
         try:
             suffix = path.suffix.lower()
             if suffix == ".pdf":
-                documents.extend(pdf_reader.load_data(str(path)))
+                docs = pdf_reader.load_data(str(path))
+                documents.extend(docs)
+                rich_metadata_map.update(pdf_reader.get_rich_metadata_map())
+                pdf_reader.clear_rich_metadata_map()
+
             elif suffix == ".wpd":
-                documents.extend(wpd_reader.load_data(str(path)))
+                docs = wpd_reader.load_data(str(path))
+                documents.extend(docs)
+                rich_metadata_map.update(wpd_reader.get_rich_metadata_map())
+                wpd_reader.clear_rich_metadata_map()
+
         except Exception as e:
             print(f"Failed to load {path}: {e}")
 
     print(f"Loaded {len(documents)} documents from {len(paths)} PDF/WPD files.")
-    return documents
-
-
-import time
-
-if __name__ == "__main__":
-    start = time.time()
-
-    all_files = [
-        p for p in DOCS_DIR.rglob("*")
-        if p.is_file() and p.suffix.lower() in {".pdf", ".wpd"}
-    ]
-    docs = feed_documents(file_paths_to_insert=all_files, docs_root=DOCS_DIR)   
-
-    print(f"\nLoaded {len(docs)} documents")
-    print(f"Elapsed time: {time.time() - start:.2f} seconds\n")
+    return documents, rich_metadata_map

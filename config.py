@@ -4,8 +4,6 @@ import psutil
 from llama_index.core.prompts import PromptTemplate
 
 
-
-
 BASE_DIR = Path(__file__).resolve().parent
 DB_DIR = BASE_DIR / "vector_db"
 STORAGE_DIR = DB_DIR / "storage"
@@ -16,6 +14,8 @@ STORED_FILES_PATH = BASE_DIR / "setup_index" / "stored_files.json"
 DEFAULT_MAX_UPSERT_FILES = 20
 DOCS_STORE = STORAGE_DIR / "docstore.json"
 WPD_PATH = BASE_DIR / "wpd_support" / "wpd2text" / "wpd2text.exe"
+METADATA_FACETS_PATH = DB_DIR / "metadata_facets.json"
+METADATA_SOURCE_CONTRIBUTIONS_PATH = DB_DIR / "metadata_source_contributions.json"
 
 ACCEPTED_FILE_TYPES = {".pdf", ".wpd"}
 
@@ -113,11 +113,6 @@ EXTRACT_TEXT_WINDOW = 5000
 EXTRACT_JOB_WINDOW = 2000
 MAX_VALID_YEAR = 1999
 MIN_VALID_YEAR = 1800
-
-# Do Header, filter by metadata (json file)
-
-#can later filter by metadata so will be important to add as much metadata as possible
-# only include in header very important info bc ikts visitble to llm
 
 #strugglnig to answer about the memos, when given job numbers
 # need to expand window to more than just first 5k chars for metadata bc shipyards getting cut
