@@ -10,7 +10,8 @@ STORAGE_DIR = DB_DIR / "storage"
 DOCS_DIR = BASE_DIR / "Docs"  #was docs_root
 INDEX_ID = "main_index"
 COLLECTION_NAME = "test_store"
-STORED_FILES_PATH = BASE_DIR / "setup_index" / "stored_files.json"
+#STORED_FILES_PATH = BASE_DIR / "setup_index" / "stored_files.json"
+STORED_FILES_PATH = DB_DIR / "stored_files.json"
 DEFAULT_MAX_UPSERT_FILES = 20
 DOCS_STORE = STORAGE_DIR / "docstore.json"
 WPD_PATH = BASE_DIR / "wpd_support" / "wpd2text" / "wpd2text.exe"
@@ -90,8 +91,140 @@ QA_TEMPLATE = PromptTemplate(
     "- Do not use outside knowledge.\n"
     "- If the question asks about a specific job, rate, ship, ship class, year range, shipyard, or place, only report exact or clearly supported matches from the context.\n"
     "- Do not infer that a job, rate, ship, or exposure is present unless it is explicitly stated or clearly supported in the context.\n"
+    "- Do not misclassify the purpose of a document when answering factual questions.\n"
     "- If a document is identified by an internal job number in its title, treat that title as part of the evidence.\n"
     "- If the context does not contain the answer, say exactly: I cannot find this in the documents.\n\n"
+    "Answer:"
+)
+
+EXPOSURE_ANALYSIS_TEMPLATE = PromptTemplate(
+    "Context:\n{context_str}\n\n"
+    "Question: {query_str}\n\n"
+
+    "Task:\n"
+    "Analyze the provided document context for asbestos exposure information.\n\n"
+
+    "Instructions:\n"
+    "- Answer using only the provided context.\n"
+    "- Do not use outside knowledge.\n"
+    "- Focus on exposure-related facts that are explicitly stated or clearly supported.\n"
+    "- Distinguish between confirmed exposure, possible exposure, and background information.\n"
+    "- Do not assume exposure only because a person served in the Navy, worked on a ship, held a rate, or worked at a shipyard.\n"
+    "- If service records, work history, ships, rates, duties, or locations are being reviewed to evaluate exposure, explain how they relate to the exposure analysis.\n"
+    "- Preserve uncertainty when the context is incomplete or indirect.\n"
+    "- If the context does not support an exposure finding, say so clearly.\n\n"
+
+    "Answer Format:\n"
+    "Exposure Summary:\n"
+    "Supporting Evidence:\n"
+    "Ships / Jobs / Rates / Locations Mentioned:\n"
+    "Uncertainty or Limitations:\n\n"
+
+    "Answer:"
+)
+
+SUMMARY_TEMPLATE = PromptTemplate(
+    "Context:\n{context_str}\n\n"
+    "Question: {query_str}\n\n"
+
+    "Task:\n"
+    "Summarize or explain the document information using only the provided context.\n\n"
+
+    "Instructions:\n"
+    "- Do not use outside knowledge.\n"
+    "- Focus on the document's purpose, key points, and important details.\n"
+    "- Distinguish between what the document is trying to explain and the records or evidence it reviews.\n"
+    "- Do not describe a document only by the records it discusses.\n"
+    "- If the document reviews service records, work history, ships, rates, duties, or assignments to evaluate asbestos exposure, describe that as an asbestos exposure analysis or evaluation when supported by the context.\n"
+    "- If the user asks for a brief summary, answer in 2-4 sentences.\n"
+    "- If the user asks for an explanation, provide a clear paragraph or short organized sections.\n"
+    "- Do not hallucinate or infer beyond what is clearly supported.\n"
+    "- If the context is insufficient, say: I cannot determine this from the provided context.\n\n"
+
+    "Answer:"
+)
+
+TIMELINE_TEMPLATE = PromptTemplate(
+    "Context:\n{context_str}\n\n"
+    "Question: {query_str}\n\n"
+
+    "Task:\n"
+    "Create a chronological timeline from the provided document context.\n\n"
+
+    "Instructions:\n"
+    "- Use only the provided context.\n"
+    "- Do not use outside knowledge.\n"
+    "- Include only dates, years, year ranges, events, ships, jobs, rates, locations, or assignments that are explicitly stated or clearly supported.\n"
+    "- If an exact date is unavailable but a year or range is provided, use the available level of detail.\n"
+    "- Do not invent missing dates or fill timeline gaps with assumptions.\n"
+    "- If events cannot be placed in chronological order, list them under 'Undated or Unclear Events.'\n\n"
+
+    "Answer Format:\n"
+    "Timeline:\n"
+    "- Date/Year:\n"
+    "  Event:\n"
+    "  Source Detail:\n\n"
+    "Undated or Unclear Events:\n"
+    "- Event:\n"
+    "  Reason unclear:\n\n"
+
+    "Answer:"
+)
+
+REFERENCE_EVIDENCE_TEMPLATE = PromptTemplate(
+    "Context:\n{context_str}\n\n"
+    "Question: {query_str}\n\n"
+
+    "Task:\n"
+    "Find reference-list entries from the provided context that match the user's requested topic.\n\n"
+
+    "Instructions:\n"
+    "- Use only the provided context.\n"
+    "- Do not use outside knowledge.\n"
+    "- The context may contain reference entries labeled with letters such as AL), AM), AN), AO), AP), AQ), AR), AS), or AT).\n"
+    "- Treat each lettered item as a separate reference entry.\n"
+    "- The header lines such as 'Report ships' or 'Report rates' provide context for the reference page, but the answer should cite the actual lettered reference entries when possible.\n"
+    "- Match the user's requested topic against both the header context and the full text of each lettered reference entry.\n"
+    "- If the requested topic appears in a reference entry, include that entry as an exact match.\n"
+    "- If the requested topic appears only in the header context, include the most relevant reference entries and label them as context-supported.\n"
+    "- Do not say references are missing if the requested topic appears anywhere in the context.\n"
+    "- Preserve the reference label and reference text.\n"
+    "- If no relevant reference entries are found, say exactly: I cannot find references for this in the documents.\n\n"
+
+    "Answer Format:\n"
+    "Relevant References:\n"
+    "- Reference:\n"
+    "  Match Type: Exact / Context-supported\n"
+    "  Relevance to Query:\n"
+    "  Source:\n\n"
+
+    "Answer:"
+)
+
+COMPARISON_TEMPLATE = PromptTemplate(
+    "Context:\n{context_str}\n\n"
+    "Question: {query_str}\n\n"
+
+    "Task:\n"
+    "Compare the relevant information found in the provided document context.\n\n"
+
+    "Instructions:\n"
+    "- Use only the provided context.\n"
+    "- Do not use outside knowledge.\n"
+    "- Compare only facts that are explicitly stated or clearly supported.\n"
+    "- Identify agreements, differences, contradictions, and missing information.\n"
+    "- Do not force a conclusion if the documents do not provide enough evidence.\n"
+    "- Clearly distinguish between confirmed differences and differences caused by missing or incomplete context.\n"
+    "- Preserve source details such as title, page, job number, ship, rate, year, or location when available.\n\n"
+
+    "Answer Format:\n"
+    "Comparison Summary:\n"
+    "Agreements:\n"
+    "Differences:\n"
+    "Contradictions or Conflicts:\n"
+    "Missing or Unclear Information:\n"
+    "Most Relevant Sources:\n\n"
+
     "Answer:"
 )
 
@@ -154,5 +287,17 @@ RATE_ALIASES = {
     "Boilerman": [
         "boilerman",
         "bt",  # only keep if this is actually right for your corpus; otherwise remove
+    ],
+    "Seaman": [
+    "seaman",
+    "sn",
+    ],
+    "Airman": [
+        "airman",
+        "an",
+    ],
+    "Radarman": [
+        "radarman",
+        "rd",
     ],
 }

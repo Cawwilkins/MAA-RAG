@@ -27,6 +27,24 @@ def preprocess_for_ocr(img):
     img = ImageOps.autocontrast(img)
     return img
 
+def is_references_heading(page_text: str) -> bool:
+    """
+    Returns True if the first non-empty line is a References heading.
+    Handles:
+    References
+    REFERENCES
+    References:
+    References :
+    """
+    for line in (page_text or "").splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        return bool(re.fullmatch(r"(?i)references\s*:?", line))
+
+    return False
 
 def clean_ocr(text: str) -> str:
     text = re.sub(r"-\n(\w)", r"\1", text)
@@ -180,10 +198,21 @@ class HybridPDFReader(BaseReader):
 
         combined_text = "\n".join(pages_text)
         metadata_fields = extract_all_metadata(file_path, title, combined_text, source)
-
+        doc_type = str(metadata_fields.get("doc_type", "")).lower()
+        in_references_section = False
         docs: List[Document] = []
 
         for i, page_text in enumerate(pages_text, start=1):
+            if doc_type == "report" and is_references_heading(page_text):
+                in_references_section = True
+
+            page_section_metadata = {}
+            if in_references_section:
+                page_section_metadata = {
+                    "section": "references",
+                    "is_reference_page": True,
+                    "page_role": "reference_page",
+                }
             # Store rich metadata externally for later reattachment.
             rich_metadata = build_rich_metadata_for_storage(
                 metadata_fields=metadata_fields,
@@ -195,7 +224,7 @@ class HybridPDFReader(BaseReader):
 
             # Only attach compact metadata before pipeline chunking.
             minimal_metadata = build_minimal_metadata(
-                extra_info=extra_info,
+                extra_info={**extra_info, **page_section_metadata},
                 title=title,
                 job_number=metadata_fields.get("job_number"),
                 source_id=source_id,
@@ -270,6 +299,15 @@ class WPDReader(BaseReader):
         page = 1
 
         metadata_fields = extract_all_metadata(file_path, title, text, source)
+        doc_type = str(metadata_fields.get("doc_type", "")).lower()
+        section_metadata = {}
+
+        if doc_type == "report" and is_references_heading(text):
+            section_metadata = {
+                "section": "references",
+                "is_reference_page": True,
+                "page_role": "reference_page",
+            }
 
         rich_metadata = build_rich_metadata_for_storage(
             metadata_fields=metadata_fields,
@@ -280,7 +318,7 @@ class WPDReader(BaseReader):
         self._rich_metadata_map[make_rich_metadata_key(source_id, page)] = rich_metadata
 
         minimal_metadata = build_minimal_metadata(
-            extra_info=extra_info,
+            extra_info={**extra_info, **section_metadata},
             title=title,
             job_number=metadata_fields.get("job_number"),
             source_id=source_id,

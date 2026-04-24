@@ -14,6 +14,7 @@ from setup_index.file_utils import get_source_id
 FACET_FIELDS = [
     "job_number",
     "doc_type",
+    "section",
     "ships",
     "ship_classes",
     "years_mentioned",
@@ -294,19 +295,40 @@ def build_source_metadata_from_documents(documents: list[Any]) -> dict[str, dict
 
     return source_meta
 
-def build_source_metadata_from_rich_map(
-    rich_metadata_map: dict[tuple[str, int], dict[str, Any]]
-) -> dict[str, dict[str, Any]]:
-    """
-    Collapse page-level rich metadata into one metadata record per source_id.
-    The rich metadata was computed at the document level and copied onto pages,
-    so taking the first page we see for each source_id is enough.
-    """
-    source_meta: dict[str, dict[str, Any]] = {}
+# def build_source_metadata_from_rich_map(
+#     rich_metadata_map: dict[tuple[str, int], dict[str, Any]]
+# ) -> dict[str, dict[str, Any]]:
+#     """
+#     Collapse page-level rich metadata into one metadata record per source_id.
+#     The rich metadata was computed at the document level and copied onto pages,
+#     so taking the first page we see for each source_id is enough.
+#     """
+#     source_meta: dict[str, dict[str, Any]] = {}
+
+#     for (source_id, _page), metadata in rich_metadata_map.items():
+#         if source_id not in source_meta:
+#             source_meta[source_id] = metadata
+
+#     return source_meta
+
+def build_source_metadata_from_rich_map(rich_metadata_map):
+    source_meta = {}
 
     for (source_id, _page), metadata in rich_metadata_map.items():
         if source_id not in source_meta:
-            source_meta[source_id] = metadata
+            source_meta[source_id] = metadata.copy()
+
+            # Initialize section as set
+            if "section" in metadata:
+                source_meta[source_id]["section"] = set()
+
+        if metadata.get("section"):
+            source_meta[source_id].setdefault("section", set()).add(metadata["section"])
+
+    # Convert sets to lists for JSON
+    for source_id in source_meta:
+        if isinstance(source_meta[source_id].get("section"), set):
+            source_meta[source_id]["section"] = list(source_meta[source_id]["section"])
 
     return source_meta
 

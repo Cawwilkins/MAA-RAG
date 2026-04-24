@@ -15,19 +15,36 @@ from setup_index.feed_documents_upsert import reattach_rich_metadata_to_nodes
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_OFFLINE"] = "1"
 
-# Debug function to see node info
-def debug_print_nodes(nodes, n: int = 3) -> None:
-    print("\n==== NODE DEBUG SAMPLE ====")
-    for i, node in enumerate(nodes[:n]):
+def debug_print_nodes(nodes, start: int = 1, end: int = 200) -> None:
+    print("\n==== REFERENCE NODE DEBUG SAMPLE ====")
+
+    # Safety bounds
+    start = max(0, start)
+    end = min(len(nodes) - 1, end)
+
+    found = False
+
+    for i in range(start, end + 1):
+        node = nodes[i]
+
+        meta = getattr(node, "metadata", {}) or {}
+        section = meta.get("section")
+
+        # Only print reference nodes
+        if section != "references":
+            continue
+
+        found = True
+
         node_id = getattr(node, "node_id", None) or getattr(node, "id_", None)
         text = getattr(node, "text", "") or ""
-        meta = getattr(node, "metadata", {}) or {}
         rels = getattr(node, "relationships", {}) or {}
 
         print(f"\n--- Node {i} ---")
         print("node_id:", node_id)
         print("text_len:", len(text))
-        print("text_preview:", repr(text[:250]))
+        print("text_preview:", text)
+
         print("metadata:")
         print("  title:", meta.get("title"))
         print("  doc_type:", meta.get("doc_type"))
@@ -35,8 +52,14 @@ def debug_print_nodes(nodes, n: int = 3) -> None:
         print("  file_path:", meta.get("file_path"))
         print("  page:", meta.get("page"))
         print("  source_id:", meta.get("source_id"))
+        print("  section:", meta.get("section"))
+        print("  is_reference_page:", meta.get("is_reference_page"))
+        print("  page_role:", meta.get("page_role"))
 
-        extractor_keys = [k for k in meta.keys() if "keyword" in k.lower() or "summary" in k.lower()]
+        extractor_keys = [
+            k for k in meta.keys()
+            if "keyword" in k.lower() or "summary" in k.lower()
+        ]
         if extractor_keys:
             print("extractor_fields:")
             for k in extractor_keys:
@@ -48,19 +71,62 @@ def debug_print_nodes(nodes, n: int = 3) -> None:
                 rid = getattr(rv, "node_id", None) or getattr(rv, "id_", None) or str(rv)
                 print(f"  {rk}: {rid[:120]}")
 
+    if not found:
+        print("\nNo reference nodes found in this range.")
+
+def clean_list_for_header(values, max_items=8):
+    if not values:
+        return None
+
+    if not isinstance(values, list):
+        values = [values]
+
+    cleaned = []
+    seen = set()
+
+    for value in values:
+        value = str(value).strip()
+        if not value:
+            continue
+
+        # Basic cleanup for polluted ship names
+        value = value.split(".")[0].strip()
+
+        if value not in seen:
+            seen.add(value)
+            cleaned.append(value)
+
+        if len(cleaned) >= max_items:
+            break
+
+    return ", ".join(cleaned) if cleaned else None
+
 
 def prepend_key_metadata_to_nodes(nodes, **kwargs):
+    def format_list(value):
+        if not value:
+            return None
+        if isinstance(value, list):
+            return ", ".join(str(v) for v in value)
+        return str(value)
+
     for node in nodes:
         meta = getattr(node, "metadata", {}) or {}
 
         title = meta.get("title")
         job_number = meta.get("job_number")
+        section = meta.get("section")
 
         header_parts = []
+
         if title:
             header_parts.append(f"Document title: {title}")
         if job_number:
             header_parts.append(f"Job {job_number}")
+
+        if section == "references":
+            header_parts.append("Section: References")
+            header_parts.append("Sources, citations")
 
         if header_parts:
             header = "\n".join(header_parts) + "\n\n"
@@ -201,7 +267,7 @@ def doc_embed_store(docs: list[Document], rich_metadata_map: dict[tuple[str, int
         nodes = reattach_rich_metadata_to_nodes(nodes, rich_metadata_map)
         nodes = prepend_key_metadata_to_nodes(nodes)
 
-        debug_print_nodes(nodes, n=5)
+        debug_print_nodes(nodes, 1, 200)
         print(f"✅ Pipeline completed. Generated {len(nodes)} nodes.")
 
         # Add nodes to storage
