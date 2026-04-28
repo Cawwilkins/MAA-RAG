@@ -7,7 +7,7 @@ from llama_index.core.prompts import PromptTemplate
 BASE_DIR = Path(__file__).resolve().parent
 DB_DIR = BASE_DIR / "vector_db"
 STORAGE_DIR = DB_DIR / "storage"
-DOCS_DIR = BASE_DIR / "Docs"  #was docs_root
+DOCS_DIR = Path(r"C:\Users\Christian.DESKTOP-2DI7LJ6\Documents\Local_Code\MAA-RAG\Documents\Docs")  #was docs_root
 INDEX_ID = "main_index"
 COLLECTION_NAME = "test_store"
 #STORED_FILES_PATH = BASE_DIR / "setup_index" / "stored_files.json"
@@ -42,6 +42,10 @@ CHUNK_OVERLAP = 100
 SIMILARITY_TOP_K = 25 # Testing with 25 and 40 to see if recall is better
 MIXED_TOP_K = 40 # boosting to 40/40/60 makes it take twice as long
 SCORE_RATIO = 0.85 # keep nodes that are at least 85% as good as first node
+RETRIEVE_ONLY_DEFAULT_TOP_K = 60
+RETRIEVE_ONLY_MIN_TOP_K = 5
+RETRIEVE_ONLY_MAX_TOP_K = 200
+RETRIEVE_ONLY_DEFAULT_RATIO = SCORE_RATIO
 
 # MISC
 PHYSICAL_CORES = psutil.cpu_count(logical=False)
@@ -86,159 +90,43 @@ GENERATIVE_MODEL_CONFIG = {
 QA_TEMPLATE = PromptTemplate(
     "Context:\n{context_str}\n\n"
     "Question: {query_str}\n\n"
-    "Instructions:\n"
-    "- Answer using only the provided context.\n"
-    "- Do not use outside knowledge.\n"
-    "- If the question asks about a specific job, rate, ship, ship class, year range, shipyard, or place, only report exact or clearly supported matches from the context.\n"
-    "- Do not infer that a job, rate, ship, or exposure is present unless it is explicitly stated or clearly supported in the context.\n"
-    "- Do not misclassify the purpose of a document when answering factual questions.\n"
-    "- If a document is identified by an internal job number in its title, treat that title as part of the evidence.\n"
-    "- If the context does not contain the answer, say exactly: I cannot find this in the documents.\n\n"
-    "Answer:"
-)
-
-EXPOSURE_ANALYSIS_TEMPLATE = PromptTemplate(
-    "Context:\n{context_str}\n\n"
-    "Question: {query_str}\n\n"
-
-    "Task:\n"
-    "Analyze the provided document context for asbestos exposure information.\n\n"
-
-    "Instructions:\n"
-    "- Answer using only the provided context.\n"
-    "- Do not use outside knowledge.\n"
-    "- Focus on exposure-related facts that are explicitly stated or clearly supported.\n"
-    "- Distinguish between confirmed exposure, possible exposure, and background information.\n"
-    "- Do not assume exposure only because a person served in the Navy, worked on a ship, held a rate, or worked at a shipyard.\n"
-    "- If service records, work history, ships, rates, duties, or locations are being reviewed to evaluate exposure, explain how they relate to the exposure analysis.\n"
-    "- Preserve uncertainty when the context is incomplete or indirect.\n"
-    "- If the context does not support an exposure finding, say so clearly.\n\n"
-
-    "Answer Format:\n"
-    "Exposure Summary:\n"
-    "Supporting Evidence:\n"
-    "Ships / Jobs / Rates / Locations Mentioned:\n"
-    "Uncertainty or Limitations:\n\n"
-
+    "Rules:\n"
+    "- Use only the context.\n"
+    "- Report only explicit or clearly supported facts.\n"
+    "- If not found in context, say exactly: I cannot find this in the documents.\n\n"
     "Answer:"
 )
 
 SUMMARY_TEMPLATE = PromptTemplate(
     "Context:\n{context_str}\n\n"
     "Question: {query_str}\n\n"
-
-    "Task:\n"
-    "Summarize or explain the document information using only the provided context.\n\n"
-
-    "Instructions:\n"
-    "- Do not use outside knowledge.\n"
-    "- Focus on the document's purpose, key points, and important details.\n"
-    "- Distinguish between what the document is trying to explain and the records or evidence it reviews.\n"
-    "- Do not describe a document only by the records it discusses.\n"
-    "- If the document reviews service records, work history, ships, rates, duties, or assignments to evaluate asbestos exposure, describe that as an asbestos exposure analysis or evaluation when supported by the context.\n"
-    "- If the user asks for a brief summary, answer in 2-4 sentences.\n"
-    "- If the user asks for an explanation, provide a clear paragraph or short organized sections.\n"
-    "- Do not hallucinate or infer beyond what is clearly supported.\n"
-    "- If the context is insufficient, say: I cannot determine this from the provided context.\n\n"
-
+    "Rules:\n"
+    "- Summarize only from context.\n"
+    "- Focus on document purpose, key findings, and important details.\n"
+    "- If insufficient context, say exactly: I cannot determine this from the provided context.\n\n"
     "Answer:"
 )
 
 TIMELINE_TEMPLATE = PromptTemplate(
     "Context:\n{context_str}\n\n"
     "Question: {query_str}\n\n"
-
-    "Task:\n"
-    "Create a chronological timeline from the provided document context.\n\n"
-
-    "Instructions:\n"
-    "- Use only the provided context.\n"
-    "- Do not use outside knowledge.\n"
-    "- Include only dates, years, year ranges, events, ships, jobs, rates, locations, or assignments that are explicitly stated or clearly supported.\n"
-    "- If an exact date is unavailable but a year or range is provided, use the available level of detail.\n"
-    "- Do not invent missing dates or fill timeline gaps with assumptions.\n"
-    "- If events cannot be placed in chronological order, list them under 'Undated or Unclear Events.'\n\n"
-
-    "Answer Format:\n"
+    "Rules:\n"
+    "- Build chronology using only explicit dates/years/ranges from context.\n"
+    "- Do not invent dates.\n"
+    "- Put uncertain ordering under Undated or Unclear Events.\n\n"
+    "Format:\n"
     "Timeline:\n"
     "- Date/Year:\n"
     "  Event:\n"
-    "  Source Detail:\n\n"
-    "Undated or Unclear Events:\n"
-    "- Event:\n"
-    "  Reason unclear:\n\n"
-
-    "Answer:"
-)
-
-REFERENCE_EVIDENCE_TEMPLATE = PromptTemplate(
-    "Context:\n{context_str}\n\n"
-    "Question: {query_str}\n\n"
-
-    "Task:\n"
-    "Find reference-list entries from the provided context that match the user's requested topic.\n\n"
-
-    "Instructions:\n"
-    "- Use only the provided context.\n"
-    "- Do not use outside knowledge.\n"
-    "- The context may contain reference entries labeled with letters such as AL), AM), AN), AO), AP), AQ), AR), AS), or AT).\n"
-    "- Treat each lettered item as a separate reference entry.\n"
-    "- The header lines such as 'Report ships' or 'Report rates' provide context for the reference page, but the answer should cite the actual lettered reference entries when possible.\n"
-    "- Match the user's requested topic against both the header context and the full text of each lettered reference entry.\n"
-    "- If the requested topic appears in a reference entry, include that entry as an exact match.\n"
-    "- If the requested topic appears only in the header context, include the most relevant reference entries and label them as context-supported.\n"
-    "- Do not say references are missing if the requested topic appears anywhere in the context.\n"
-    "- Preserve the reference label and reference text.\n"
-    "- If no relevant reference entries are found, say exactly: I cannot find references for this in the documents.\n\n"
-
-    "Answer Format:\n"
-    "Relevant References:\n"
-    "- Reference:\n"
-    "  Match Type: Exact / Context-supported\n"
-    "  Relevance to Query:\n"
-    "  Source:\n\n"
-
-    "Answer:"
-)
-
-COMPARISON_TEMPLATE = PromptTemplate(
-    "Context:\n{context_str}\n\n"
-    "Question: {query_str}\n\n"
-
-    "Task:\n"
-    "Compare the relevant information found in the provided document context.\n\n"
-
-    "Instructions:\n"
-    "- Use only the provided context.\n"
-    "- Do not use outside knowledge.\n"
-    "- Compare only facts that are explicitly stated or clearly supported.\n"
-    "- Identify agreements, differences, contradictions, and missing information.\n"
-    "- Do not force a conclusion if the documents do not provide enough evidence.\n"
-    "- Clearly distinguish between confirmed differences and differences caused by missing or incomplete context.\n"
-    "- Preserve source details such as title, page, job number, ship, rate, year, or location when available.\n\n"
-
-    "Answer Format:\n"
-    "Comparison Summary:\n"
-    "Agreements:\n"
-    "Differences:\n"
-    "Contradictions or Conflicts:\n"
-    "Missing or Unclear Information:\n"
-    "Most Relevant Sources:\n\n"
 
     "Answer:"
 )
 
 SYSTEM_TEMPLATE = (
     "You are a document analysis assistant.\n"
-    "Your task is to answer questions strictly from the provided document context.\n\n"
-    "Rules:\n"
-    "- Use only the provided context.\n"
-    "- Do not use outside knowledge.\n"
-    "- Report only what is explicitly stated or clearly supported in the context.\n"
-    "- For questions about a specific job, rate, ship, ship class, year range, shipyard, or place, treat the exact requested term as critical.\n"
-    "- Do not substitute related occupations or make unsupported connections.\n"
-    "- Preserve distinctions between exact matches, partial matches, and unrelated entries when relevant.\n"
-    "- If the answer is not in the context, say exactly: I cannot find this in the documents.\n"
+    "Use only provided context.\n"
+    "Do not use outside knowledge.\n"
+    "Report explicit or clearly supported facts only.\n"
 )
 
 #MetaData Extraction: 
@@ -286,11 +174,11 @@ RATE_ALIASES = {
     ],
     "Boilerman": [
         "boilerman",
-        "bt",  # only keep if this is actually right for your corpus; otherwise remove
+        "bt",
     ],
     "Seaman": [
-    "seaman",
-    "sn",
+        "seaman",
+        "sn",
     ],
     "Airman": [
         "airman",
@@ -299,5 +187,309 @@ RATE_ALIASES = {
     "Radarman": [
         "radarman",
         "rd",
+    ],
+    "Boatswain's Mate": [
+        "boatswain's mate",
+        "boatswains mate",
+        "bm",
+    ],
+    "Quartermaster": [
+        "quartermaster",
+        "qm",
+    ],
+    "Sonarman": [
+        "sonarman",
+        "so",
+    ],
+    "Sonar Technician": [
+        "sonar technician",
+        "st",
+        "sts",
+        "stg",
+    ],
+    "Signalman": [
+        "signalman",
+        "sm",
+    ],
+    "Torpedoman's Mate": [
+        "torpedoman's mate",
+        "torpedomans mate",
+        "tm",
+    ],
+    "Gunner's Mate": [
+        "gunner's mate",
+        "gunners mate",
+        "gm",
+    ],
+    "Fire Control Technician": [
+        "fire control technician",
+        "ft",
+        "ftm",
+        "ftg",
+    ],
+    "Mineman": [
+        "mineman",
+        "mn",
+    ],
+    "Missile Technician": [
+        "missile technician",
+        "mt",
+    ],
+    "Electronics Technician": [
+        "electronics technician",
+        "et",
+        "etr",
+        "etn",
+    ],
+    "Data Systems Technician": [
+        "data systems technician",
+        "ds",
+    ],
+    "Instrumentman": [
+        "instrumentman",
+        "im",
+    ],
+    "Opticalman": [
+        "opticalman",
+        "om",
+    ],
+    "Postal Clerk": [
+        "postal clerk",
+        "pc",
+    ],
+    "Communications Technician": [
+        "communications technician",
+        "ct",
+    ],
+    "Communications Yeoman": [
+        "communications yeoman",
+        "cyn",
+    ],
+    "Yeoman": [
+        "yeoman",
+        "yn",
+    ],
+    "Personnelman": [
+        "personnelman",
+        "pn",
+    ],
+    "Machine Accountant": [
+        "machine accountant",
+        "ma",
+    ],
+    "Storekeeper": [
+        "storekeeper",
+        "sk",
+    ],
+    "Disbursing Clerk": [
+        "disbursing clerk",
+        "dk",
+    ],
+    "Commissaryman": [
+        "commissaryman",
+        "cs",
+    ],
+    "Ship's Serviceman": [
+        "ship's serviceman",
+        "ships serviceman",
+        "sh",
+        "shs",
+        "shb",
+        "sht",
+        "shl",
+        "shr",
+    ],
+    "Journalist": [
+        "journalist",
+        "jo",
+    ],
+    "Lithographer": [
+        "lithographer",
+        "li",
+    ],
+    "Illustrator Draftsman": [
+        "illustrator draftsman",
+        "dm",
+    ],
+    "Musician": [
+        "musician",
+        "mu",
+    ],
+    "Machinery Repairman": [
+        "machinery repairman",
+        "mr",
+    ],
+    "Interior Communications Electrician": [
+        "interior communications electrician",
+        "ic",
+    ],
+    "Shipfitter": [
+        "shipfitter",
+        "sf",
+        "sfm",
+        "sfp",
+    ],
+    "Damage Controlman": [
+        "damage controlman",
+        "dc",
+    ],
+    "Patternmaker": [
+        "patternmaker",
+        "pm",
+    ],
+    "Molder": [
+        "molder",
+        "ml",
+    ],
+    "Boilermaker": [
+        "boilermaker",
+        "br",
+    ],
+    "Engineering Aid": [
+        "engineering aid",
+        "ea",
+        "eas",
+        "ead",
+    ],
+    "Construction Electrician": [
+        "construction electrician",
+        "ce",
+        "cew",
+        "cep",
+        "cet",
+        "ces",
+    ],
+    "Equipment Operator": [
+        "equipment operator",
+        "eo",
+        "eon",
+        "eoh",
+    ],
+    "Construction Mechanic": [
+        "construction mechanic",
+        "cm",
+        "cma",
+        "cmh",
+    ],
+    "Builder": [
+        "builder",
+        "bu",
+        "bul",
+        "buh",
+        "bur",
+    ],
+    "Steelworker": [
+        "steelworker",
+        "sw",
+        "swe",
+        "swf",
+    ],
+    "Utilitiesman": [
+        "utilitiesman",
+        "ut",
+        "utp",
+        "uta",
+        "utb",
+        "utw",
+    ],
+    "Aviation Maintenance Administrationman": [
+        "aviation maintenance administrationman",
+        "az",
+    ],
+    "Aviation Machinist's Mate": [
+        "aviation machinist's mate",
+        "aviation machinists mate",
+        "ad",
+        "adj",
+        "adr",
+    ],
+    "Aviation Antisubmarine Warfare Technician": [
+        "aviation antisubmarine warfare technician",
+        "ax",
+    ],
+    "Aviation Electronics Technician": [
+        "aviation electronics technician",
+        "at",
+        "atr",
+        "atn",
+    ],
+    "Photographic Intelligenceman": [
+        "photographic intelligenceman",
+        "pt",
+    ],
+    "Aviation Ordnanceman": [
+        "aviation ordnanceman",
+        "ao",
+    ],
+    "Air Controlman": [
+        "air controlman",
+        "ac",
+    ],
+    "Aviation Boatswain's Mate": [
+        "aviation boatswain's mate",
+        "aviation boatswains mate",
+        "ab",
+        "abh",
+        "abf",
+        "abe",
+    ],
+    "Aviation Electrician's Mate": [
+        "aviation electrician's mate",
+        "aviation electricians mate",
+        "ae",
+    ],
+    "Aviation Structural Mechanic": [
+        "aviation structural mechanic",
+        "am",
+        "ams",
+        "amh",
+        "ame",
+    ],
+    "Parachute Rigger": [
+        "parachute rigger",
+        "pr",
+    ],
+    "Aerographer's Mate": [
+        "aerographer's mate",
+        "aerographers mate",
+        "ag",
+    ],
+    "Tradewoman": [
+        "tradewoman",
+        "td",
+    ],
+    "Aviation Support Equipment Technician": [
+        "aviation support equipment technician",
+        "as",
+        "ase",
+        "ash",
+        "asm",
+    ],
+    "Aviation Fire Control Technician": [
+        "aviation fire control technician",
+        "aq",
+        "aqf",
+        "aqb",
+    ],
+    "Aviation Storekeeper": [
+        "aviation storekeeper",
+        "ak",
+    ],
+    "Photographer's Mate": [
+        "photographer's mate",
+        "photographers mate",
+        "ph",
+    ],
+    "Hospital Corpsman": [
+        "hospital corpsman",
+        "hm",
+    ],
+    "Dental Technician": [
+        "dental technician",
+        "dt",
+    ],
+    "Steward": [
+        "steward",
+        "sd",
     ],
 }

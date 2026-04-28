@@ -168,7 +168,7 @@ def load_index():
 
 class ScoreThresholdFilter(BaseNodePostprocessor):
     ratio: float = SCORE_RATIO
-    debug: bool = True
+    debug: bool = False
 
     def _postprocess_nodes(
         self,
@@ -202,12 +202,27 @@ class ScoreThresholdFilter(BaseNodePostprocessor):
         return filtered if filtered else nodes[:1]
     
 
-def initialize_query_engine(index, template=QA_TEMPLATE, metadata_filters=None):
+def initialize_query_engine(
+    index,
+    template=QA_TEMPLATE,
+    metadata_filters=None,
+    similarity_top_k: int | None = None,
+    mixed_top_k: int | None = None,
+    score_ratio: float | None = None,
+    rerank_top_n: int | None = None,
+    include_threshold_postprocessor: bool = True,
+    include_reorder_postprocessor: bool = True,
+):
     print("Docstore keys:", len(index.docstore.docs))
+    similarity_top_k = similarity_top_k or SIMILARITY_TOP_K
+    mixed_top_k = mixed_top_k or MIXED_TOP_K
+    score_ratio = score_ratio if score_ratio is not None else SCORE_RATIO
+    rerank_top_n = rerank_top_n or RERANK_MODEL_CONFIG.get("top_n", 5)
+
     llama_filters = build_metadata_filters(metadata_filters)
     vec_retriever=VectorIndexRetriever(
             index=index,
-            similarity_top_k=SIMILARITY_TOP_K,
+            similarity_top_k=similarity_top_k,
             embed_model=Settings.embed_model,
             filters=llama_filters
     )
@@ -216,10 +231,10 @@ def initialize_query_engine(index, template=QA_TEMPLATE, metadata_filters=None):
 
         bm25_retriever = BM25Retriever.from_defaults(
             docstore=index.storage_context.docstore,
-            similarity_top_k=SIMILARITY_TOP_K,
+            similarity_top_k=similarity_top_k,
         ),
 
-        final_top_k=MIXED_TOP_K,   # let reranker see more candidates
+        final_top_k=mixed_top_k,   # let reranker see more candidates
         rrf_k=60,
         debug=False,
     )
@@ -236,14 +251,20 @@ def initialize_query_engine(index, template=QA_TEMPLATE, metadata_filters=None):
     else:
         retriever = hybrid          # normal hybrid
 
+    rerank_config = dict(RERANK_MODEL_CONFIG)
+    rerank_config["top_n"] = rerank_top_n
+    node_postprocessors = [
+        SentenceTransformerRerank(**rerank_config),
+    ]
+    if include_threshold_postprocessor:
+        node_postprocessors.append(ScoreThresholdFilter(ratio=score_ratio))
+    if include_reorder_postprocessor:
+        node_postprocessors.append(LongContextReorder())
+
     query_engine = RetrieverQueryEngine(
         retriever = retriever,
         response_synthesizer = synthesizer,
-        node_postprocessors = [
-            SentenceTransformerRerank(**RERANK_MODEL_CONFIG),
-            ScoreThresholdFilter(ratio=SCORE_RATIO),
-            LongContextReorder(),
-        ]
+        node_postprocessors = node_postprocessors
     )
     return query_engine, hybrid
 

@@ -37,6 +37,12 @@ SHIPYARD_RE = re.compile(
 
 DOC_TYPE_PATTERNS: list[tuple[str, list[re.Pattern[str]]]] = [
     (
+        "qpl",
+        [
+            re.compile(r"\bqpl(?:\b|[-\s])", re.IGNORECASE),
+        ],
+    ),
+    (
         "deck_log",
         [
             re.compile(r"\bdeck logs?\b", re.IGNORECASE),
@@ -47,6 +53,7 @@ DOC_TYPE_PATTERNS: list[tuple[str, list[re.Pattern[str]]]] = [
         "milspec",
         [
             re.compile(r"\bmil[- ]?spec\b", re.IGNORECASE),
+            re.compile(r"\bmil[-\s]", re.IGNORECASE),
         ],
     ),
     (
@@ -54,6 +61,35 @@ DOC_TYPE_PATTERNS: list[tuple[str, list[re.Pattern[str]]]] = [
         [
             re.compile(r"\bcruise books?\b", re.IGNORECASE),
             re.compile(r"\bcruisebooks?\b", re.IGNORECASE),
+            re.compile(r"\bcruise book\b", re.IGNORECASE),
+        ],
+    ),
+    (
+        "command_history",
+        [
+            re.compile(r"\bcommand histories\b", re.IGNORECASE),
+            re.compile(r"\bcommand history\b", re.IGNORECASE),
+            re.compile(r"\bchr\b", re.IGNORECASE),
+        ],
+    ),
+    (
+        "declaration",
+        [
+            re.compile(r"\bdeclarations?\b", re.IGNORECASE),
+        ],
+    ),
+    (
+        "affidavit",
+        [
+            re.compile(r"\baffidavits?\b", re.IGNORECASE),
+            re.compile(r"\baffadavits?\b", re.IGNORECASE),
+        ],
+    ),
+    (
+        "deposition",
+        [
+            re.compile(r"\bdepositions?\b", re.IGNORECASE),
+            re.compile(r"\bdepo\b", re.IGNORECASE),
         ],
     ),
     (
@@ -67,6 +103,8 @@ DOC_TYPE_PATTERNS: list[tuple[str, list[re.Pattern[str]]]] = [
         "report",
         [
             re.compile(r"\breport\b", re.IGNORECASE),
+            re.compile(r"\bfcr\b", re.IGNORECASE),
+            re.compile(r"\bcase[\s_-]*notes?\b", re.IGNORECASE),
         ],
     ),
     (
@@ -124,6 +162,11 @@ def _build_search_space(title: str, text: str = "") -> str:
 
 def _valid_year(y: int) -> bool:
     return MIN_VALID_YEAR <= y <= MAX_VALID_YEAR
+
+
+def _add_full_year_range(years_found: set[int], start_year: int, end_year: int) -> None:
+    for year in range(start_year, end_year + 1):
+        years_found.add(year)
 
 
 def _normalize(s: str) -> str:
@@ -289,13 +332,7 @@ def collect_metadata_candidates(ctx: dict) -> dict:
 
         if _valid_year(start_year) and _valid_year(end_year):
             data["ranges_found"].append((start_year, end_year, match.start()))
-
-            if end_year - start_year <= 25:
-                for year in range(start_year, end_year + 1):
-                    data["years_found"].add(year)
-            else:
-                data["years_found"].add(start_year)
-                data["years_found"].add(end_year)
+            _add_full_year_range(data["years_found"], start_year, end_year)
 
     for match in FROM_TO_YEAR_RE.finditer(search_space):
         start_year, end_year = int(match.group(1)), int(match.group(2))
@@ -304,13 +341,7 @@ def collect_metadata_candidates(ctx: dict) -> dict:
 
         if _valid_year(start_year) and _valid_year(end_year):
             data["ranges_found"].append((start_year, end_year, match.start()))
-
-            if end_year - start_year <= 25:
-                for year in range(start_year, end_year + 1):
-                    data["years_found"].add(year)
-            else:
-                data["years_found"].add(start_year)
-                data["years_found"].add(end_year)
+            _add_full_year_range(data["years_found"], start_year, end_year)
 
     for match in YEAR_RE.finditer(search_space):
         year = int(match.group(1))

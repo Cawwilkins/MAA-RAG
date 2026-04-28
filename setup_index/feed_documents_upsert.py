@@ -20,6 +20,7 @@ from setup_index.one_pass_metadata_extractor import extract_all_metadata
 
 RichMetadataKey = Tuple[str, int]
 RichMetadataMap = Dict[RichMetadataKey, Dict[str, Any]]
+SKIP_NAME_KEYWORDS = {"certification", "invoice"}
 
 
 def preprocess_for_ocr(img):
@@ -43,6 +44,27 @@ def is_references_heading(page_text: str) -> bool:
             continue
 
         return bool(re.fullmatch(r"(?i)references\s*:?", line))
+
+    return False
+
+
+def is_enclosures_heading(page_text: str) -> bool:
+    """
+    Returns True if the first non-empty line is an Enclosures heading.
+    Handles:
+    Enclosures
+    ENCLOSURES
+    Enclosure
+    Enclosures:
+    Enclosures :
+    """
+    for line in (page_text or "").splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        return bool(re.fullmatch(r"(?i)enclosures?\s*:?", line))
 
     return False
 
@@ -70,6 +92,11 @@ def clean_plain_text(text: str) -> str:
 
 def make_rich_metadata_key(source_id: str, page: int) -> RichMetadataKey:
     return (source_id, page)
+
+
+def should_skip_ingestion(path: Path) -> bool:
+    name = path.stem.lower()
+    return any(keyword in name for keyword in SKIP_NAME_KEYWORDS)
 
 
 def build_minimal_metadata(
@@ -203,7 +230,11 @@ class HybridPDFReader(BaseReader):
         docs: List[Document] = []
 
         for i, page_text in enumerate(pages_text, start=1):
-            if doc_type == "report" and is_references_heading(page_text):
+            if (
+                doc_type == "report" and is_references_heading(page_text)
+            ) or (
+                doc_type == "memorandum" and is_enclosures_heading(page_text)
+            ):
                 in_references_section = True
 
             page_section_metadata = {}
@@ -302,7 +333,11 @@ class WPDReader(BaseReader):
         doc_type = str(metadata_fields.get("doc_type", "")).lower()
         section_metadata = {}
 
-        if doc_type == "report" and is_references_heading(text):
+        if (
+            doc_type == "report" and is_references_heading(text)
+        ) or (
+            doc_type == "memorandum" and is_enclosures_heading(text)
+        ):
             section_metadata = {
                 "section": "references",
                 "is_reference_page": True,
@@ -381,7 +416,12 @@ def collect_file_paths(file_paths_to_insert: Optional[list[str | Path]] = None) 
     cleaned: list[Path] = []
     for p in file_paths_to_insert:
         path = Path(p).resolve()
-        if path.exists() and path.is_file() and path.suffix.lower() in {".pdf", ".wpd"}:
+        if (
+            path.exists()
+            and path.is_file()
+            and path.suffix.lower() in {".pdf", ".wpd"}
+            and not should_skip_ingestion(path)
+        ):
             cleaned.append(path)
 
     return cleaned

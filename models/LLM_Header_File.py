@@ -289,10 +289,8 @@ class HybridRetriever(BaseRetriever):
         return text[:limit].replace("\n", " ")
 
     def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
-        q = query_bundle.query_str
-
-        vec_nodes = self._vec.retrieve(q)
-        bm25_nodes = self._bm25.retrieve(q)
+        vec_nodes = self._vec.retrieve(query_bundle)
+        bm25_nodes = self._bm25.retrieve(query_bundle)
 
         if self._debug:
             print("\nVECTOR RESULTS:")

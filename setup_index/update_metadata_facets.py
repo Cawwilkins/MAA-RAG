@@ -81,7 +81,30 @@ def normalize_job_number(value: str) -> str:
 
 
 def normalize_doc_type(value: str) -> str:
-    return normalize_whitespace(value).lower()
+    normalized = normalize_whitespace(value).lower()
+    normalized = normalized.replace("-", " ").replace("_", " ")
+    normalized = normalize_whitespace(normalized)
+
+    if normalized in {"fcr", "case note", "case notes", "report"}:
+        return "report"
+    if normalized in {"qpl"}:
+        return "qpl"
+    if normalized in {"cruise book", "cruise books"}:
+        return "cruise_book"
+    if normalized in {"deck log", "deck logs"}:
+        return "deck_log"
+    if normalized in {"mil spec", "milspec"} or normalized.startswith("mil "):
+        return "milspec"
+    if normalized in {"command history", "command histories", "chr"}:
+        return "command_history"
+    if normalized in {"declaration", "declarations"}:
+        return "declaration"
+    if normalized in {"affidavit", "affidavits", "affadavit", "affadavits"}:
+        return "affidavit"
+    if normalized in {"deposition", "depositions", "depo"}:
+        return "deposition"
+
+    return normalized
 
 
 def normalize_ship(value: str) -> str:
