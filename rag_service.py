@@ -11,10 +11,9 @@ from config import (
     EMBED_MODEL_CONFIG,
     GENERATIVE_MODEL_CONFIG,
     QA_TEMPLATE,
-    SUMMARY_TEMPLATE,
-    TIMELINE_TEMPLATE,
     RETRIEVE_ONLY_DEFAULT_TOP_K,
     RETRIEVE_ONLY_DEFAULT_RATIO,
+    pipeline_debug_log,
 )
 
 # Change this import if your main backend file has a different name.
@@ -22,6 +21,22 @@ from config import (
 from Interface import load_index, initialize_query_engine, updateModel
 
 from llama_index.core import QueryBundle
+
+from query_rewire import (
+    append_clarification_turn,
+    log_canonical_question_and_retrieval_query,
+    normalize_query,
+    normalize_then_expand_rate_aliases,
+)
+from document_pipeline import (
+    build_evidence_context,
+    dedupe_nodes_by_id,
+    run_canonical_question_llm,
+    run_evidence_extraction,
+    run_final_answer,
+    run_hybrid_retrieval_draft_llm,
+    run_vagueness_check,
+)
 
 
 def apply_postprocessors(query_engine, nodes, question: str):
@@ -43,26 +58,20 @@ def format_used_nodes(nodes) -> str:
             return ""
         return re.sub(r"\s+", " ", str(value)).strip()
 
-    def compact_value(value: Any) -> str:
-        if isinstance(value, list):
-            items = [compact_text(item) for item in value if compact_text(item)]
-            return ", ".join(items)
-        return compact_text(value)
-
-    def add_if_exists(lines, label, value):
-        clean_value = compact_value(value)
-        if clean_value:
-            lines.append(f"{label}: {clean_value}")
-
     lines = []
     lines.append("Here are the sources I used to generate the answer:")
 
     for i, node in enumerate(nodes, start=1):
-        text = compact_text(getattr(node, "text", "") or "")
+        text = (getattr(node, "text", "") or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         score = getattr(node, "score", None)
         meta = getattr(node, "metadata", {}) or {}
+        title = compact_text(meta.get("title")) or "Untitled source"
+        page = compact_text(meta.get("page"))
 
-        lines.append(f"--- Source {i} ---")
+        header = f"--- Source {i}: {title}"
+        if page:
+            header += f" (p. {page})"
+        lines.append(header + " ---")
 
         if score is not None:
             if isinstance(score, float):
@@ -70,23 +79,8 @@ def format_used_nodes(nodes) -> str:
             else:
                 lines.append(f"Relevance Score: {score}")
 
-        add_if_exists(lines, "Title", meta.get("title"))
-        add_if_exists(lines, "File Path", meta.get("file_path"))
-        add_if_exists(lines, "Page", meta.get("page"))
-        add_if_exists(lines, "Document Type", meta.get("doc_type"))
-        add_if_exists(lines, "Section", meta.get("section"))
-        add_if_exists(lines, "Source", meta.get("source"))
-        add_if_exists(lines, "Source Quality", meta.get("source_quality"))
-        add_if_exists(lines, "Source ID", meta.get("source_id"))
-        add_if_exists(lines, "Job Number", meta.get("job_number"))
-        add_if_exists(lines, "Ships Mentioned", meta.get("ships"))
-        add_if_exists(lines, "Ship Classes Mentioned", meta.get("ship_classes"))
-        add_if_exists(lines, "Years Mentioned", meta.get("years_mentioned"))
-        add_if_exists(lines, "Rates Mentioned", meta.get("rates_mentioned"))
-        add_if_exists(lines, "Shipyards Mentioned", meta.get("shipyards_mentioned"))
-
-        lines.append("Relevant Excerpt:")
-        lines.append(text)
+        lines.append("Excerpt:")
+        lines.append(text if text else "(No excerpt text.)")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -117,9 +111,12 @@ def _node_score(node: Any) -> float:
 
 class RAGService:
     """
-    Thin wrapper between the UI and your existing RAG backend.
+    UI-facing entry for one ``ask`` turn.
 
-    The UI should call this class instead of calling input()/print()-based functions.
+    Question pipeline (after optional vagueness + clarification):
+      ``session_question`` → ``run_hybrid_retrieval_draft_llm`` →
+      ``run_canonical_question_llm`` → ``normalize_then_expand_rate_aliases`` →
+      hybrid retrieve → evidence + final answer LLMs (both use ``canonical_question``).
     """
 
     def __init__(self):
@@ -151,8 +148,19 @@ class RAGService:
         retrieve_max_results: int = RETRIEVE_ONLY_DEFAULT_TOP_K,
         retrieve_relevance_ratio: float = RETRIEVE_ONLY_DEFAULT_RATIO,
         progress_callback: Callable[[str], None] | None = None,
+        clarification_reply: str | None = None,
+        pending_question: str | None = None,
     ):
-        metadata_filters = dict(metadata_filters or {})
+        pipeline_debug_log(
+            "RAGService.ask entry",
+            (
+                f"question={question!r}\n"
+                f"retrieve_only={retrieve_only} references_only={references_only} "
+                f"show_used_nodes={show_used_nodes}\n"
+                f"pending_question={pending_question!r}\n"
+                f"clarification_reply={clarification_reply!r}"
+            ),
+        )
 
         metadata_filters = dict(metadata_filters or {})
 
@@ -161,11 +169,56 @@ class RAGService:
 
         template_map = {
             "q": QA_TEMPLATE,
-            "s": SUMMARY_TEMPLATE,
-            "t": TIMELINE_TEMPLATE,
         }
 
         selected_template = template_map.get(template_choice, QA_TEMPLATE)
+
+        # --- Build session text, then LLM retrieval draft → canonical question → rate OR-groups ---
+        if pending_question and clarification_reply:
+            # Second turn: user replied to vagueness prompt; merge with stored pending question.
+            original_question = normalize_query(pending_question)
+            clarification_text = normalize_query(clarification_reply)
+            session_question = append_clarification_turn(pending_question, clarification_reply)
+        else:
+            normalized = normalize_query(question)
+            if progress_callback:
+                progress_callback("Checking whether your question is specific enough…")
+            ok, clar_msg = run_vagueness_check(Settings.llm, normalized)
+            if not ok:
+                pipeline_debug_log(
+                    "RAGService.ask needs_clarification (no retrieval yet)",
+                    f"pending_question will be={normalized!r}\nclarification_message={clar_msg!r}",
+                )
+                return {
+                    "answer": "",
+                    "sources": [],
+                    "metadata_filters": metadata_filters,
+                    "references_only": references_only,
+                    "used_nodes_text": "",
+                    "needs_clarification": True,
+                    "pending_question": normalized,
+                    "clarification_message": clar_msg,
+                    "retrieve_only": retrieve_only,
+                }
+            original_question = normalized
+            clarification_text = ""
+            session_question = normalized
+
+        if progress_callback:
+            progress_callback("Optimizing your question for search…")
+        hybrid_retrieval_draft = run_hybrid_retrieval_draft_llm(Settings.llm, session_question)
+
+        if progress_callback:
+            progress_callback("Finalizing your question for search and answering…")
+        canonical_question = run_canonical_question_llm(
+            Settings.llm,
+            original_question,
+            clarification_text,
+            draft_fallback_if_empty=hybrid_retrieval_draft,
+        )
+
+        hybrid_retriever_query_str = normalize_then_expand_rate_aliases(canonical_question)
+        log_canonical_question_and_retrieval_query(canonical_question, hybrid_retriever_query_str)
 
         if retrieve_only:
             if progress_callback:
@@ -184,14 +237,26 @@ class RAGService:
             )
 
             retriever = getattr(self.qe, "_retriever")
-            nodes = retriever.retrieve(QueryBundle(query_str=question))
-            nodes = apply_postprocessors(self.qe, nodes, question)
+            nodes = retriever.retrieve(QueryBundle(query_str=hybrid_retriever_query_str))
+            pipeline_debug_log(
+                "retrieve_only after retriever.retrieve",
+                f"nodes={len(nodes)} query_str={hybrid_retriever_query_str!r}",
+            )
+            nodes = apply_postprocessors(self.qe, nodes, hybrid_retriever_query_str)
+            pipeline_debug_log(
+                "retrieve_only after postprocessors",
+                f"nodes={len(nodes)}",
+            )
 
             if not references_only:
                 nodes = [
                     node for node in nodes
                     if (getattr(node, "metadata", {}) or {}).get("section") != "references"
                 ]
+                pipeline_debug_log(
+                    "retrieve_only after non-references filter",
+                    f"nodes={len(nodes)}",
+                )
 
             ranked_nodes = sorted(nodes, key=_node_score, reverse=True)
             candidate_nodes = ranked_nodes[:retrieve_max_results]
@@ -221,6 +286,8 @@ class RAGService:
                 # Safety fallback: never return zero if retrieval found candidates.
                 if not kept_nodes and candidate_nodes:
                     kept_nodes = candidate_nodes[: min(5, len(candidate_nodes))]
+
+            kept_nodes = dedupe_nodes_by_id(kept_nodes)
 
             dropped_count = len(candidate_nodes) - len(kept_nodes)
             kept_count = len(kept_nodes)
@@ -283,16 +350,28 @@ class RAGService:
         )
 
         if progress_callback:
-            progress_callback("Searching through docs...")
+            progress_callback("Searching through docs…")
         retriever = getattr(self.qe, "_retriever")
-        nodes = retriever.retrieve(QueryBundle(query_str=question))
-        nodes = apply_postprocessors(self.qe, nodes, question)
+        nodes = retriever.retrieve(QueryBundle(query_str=hybrid_retriever_query_str))
+        pipeline_debug_log(
+            "full pipeline after retriever.retrieve",
+            f"nodes={len(nodes)} query_str={hybrid_retriever_query_str!r}",
+        )
+        nodes = apply_postprocessors(self.qe, nodes, hybrid_retriever_query_str)
+        pipeline_debug_log(
+            "full pipeline after postprocessors",
+            f"nodes={len(nodes)}",
+        )
 
         if not references_only:
             nodes = [
                 node for node in nodes
                 if (getattr(node, "metadata", {}) or {}).get("section") != "references"
             ]
+            pipeline_debug_log(
+                "full pipeline after non-references filter",
+                f"nodes={len(nodes)}",
+            )
 
         if not nodes:
             return {
@@ -303,19 +382,35 @@ class RAGService:
                 "used_nodes_text": "",
             }
 
-        if progress_callback:
-            progress_callback("Generating an answer...")
-        response = self.qe._response_synthesizer.synthesize(
-            query=question,
-            nodes=nodes,
+        pipeline_debug_log(
+            "full pipeline before dedupe",
+            f"nodes={len(nodes)} canonical_question={canonical_question!r}",
         )
+        nodes = dedupe_nodes_by_id(nodes)
+
+        if progress_callback:
+            progress_callback("Extracting evidence from retrieved excerpts…")
+        evidence_context = build_evidence_context(nodes)
+        evidence_answer = run_evidence_extraction(Settings.llm, evidence_context, canonical_question)
+
+        if progress_callback:
+            evidence_body = (evidence_answer or "").strip() or "(No evidence text returned by the model.)"
+            progress_callback(
+                "This is the evidence I've extracted from the documents. "
+                "I'm thinking through an answer now…\n\n"
+                + evidence_body
+            )
+
+        answer_text = run_final_answer(Settings.llm, evidence_answer, canonical_question)
 
         used_nodes_text = format_used_nodes(nodes) if show_used_nodes else ""
 
         return {
-            "answer": str(response),
+            "answer": answer_text,
             "sources": nodes,
             "metadata_filters": metadata_filters,
             "references_only": references_only,
             "used_nodes_text": used_nodes_text,
-        } 
+            "evidence_answer": evidence_answer,
+            "canonical_question": canonical_question,
+        }

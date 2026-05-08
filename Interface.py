@@ -23,7 +23,22 @@ from llama_index.core.prompts import PromptTemplate
 from models.LLM_Header_File import HuggingFaceLLM, HybridRetriever
 from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
 from setup_index.create_index import create_index
-from config import EMBED_MODEL_CONFIG, DB_DIR, STORAGE_DIR, DOCS_DIR, COLLECTION_NAME, INDEX_ID, EXPOSURE_ANALYSIS_TEMPLATE, TIMELINE_TEMPLATE, REFERENCE_EVIDENCE_TEMPLATE, COMPARISON_TEMPLATE, SUMMARY_TEMPLATE, QA_TEMPLATE, RERANK_MODEL_CONFIG, GENERATIVE_MODEL_CONFIG, SIMILARITY_TOP_K, MIXED_TOP_K, SCORE_RATIO, DOCS_STORE
+from config import EMBED_MODEL_CONFIG, DB_DIR, STORAGE_DIR, DOCS_DIR, COLLECTION_NAME, INDEX_ID, EXPOSURE_ANALYSIS_TEMPLATE, REFERENCE_EVIDENCE_TEMPLATE, COMPARISON_TEMPLATE, QA_TEMPLATE, RERANK_MODEL_CONFIG, GENERATIVE_MODEL_CONFIG, SIMILARITY_TOP_K, MIXED_TOP_K, SCORE_RATIO, DOCS_STORE, pipeline_debug_log
+from query_rewire import (
+    append_clarification_turn,
+    log_canonical_question_and_retrieval_query,
+    normalize_query,
+    normalize_then_expand_rate_aliases,
+)
+from document_pipeline import (
+    build_evidence_context,
+    dedupe_nodes_by_id,
+    run_canonical_question_llm,
+    run_evidence_extraction,
+    run_final_answer,
+    run_hybrid_retrieval_draft_llm,
+    run_vagueness_check,
+)
 
 
 def print_final_context(query_engine, nodes, question: str):
@@ -275,51 +290,82 @@ def ask_question(query_engine, hybrid, question: str, see_results):
         return
 
     question = question.strip()
+    pipeline_debug_log("Interface.ask_question raw user question", question)
+    normalized = normalize_query(question)
+    pipeline_debug_log("Interface.ask_question normalized", normalized)
+    ok, clar_msg = run_vagueness_check(Settings.llm, normalized)
+    clarification_text = ""
+    if not ok:
+        print(f"> MAA Assistant: {clar_msg}")
+        extra = input("> MAA Assistant: Your reply (one clarification turn): ").strip()
+        clarification_text = normalize_query(extra)
+        session_question = append_clarification_turn(normalized, extra)
+    else:
+        session_question = normalized
+    original_question = normalized
+    pipeline_debug_log(
+        "Interface.ask_question session_question (before retrieval LLM passes)",
+        session_question,
+    )
+
+    print("> MAA Assistant: Optimizing query for search…")
+    hybrid_retrieval_draft = run_hybrid_retrieval_draft_llm(Settings.llm, session_question)
+    print("> MAA Assistant: Finalizing question for search and answering…")
+    canonical_question = run_canonical_question_llm(
+        Settings.llm,
+        original_question,
+        clarification_text,
+        draft_fallback_if_empty=hybrid_retrieval_draft,
+    )
+    hybrid_retriever_query_str = normalize_then_expand_rate_aliases(canonical_question)
+    log_canonical_question_and_retrieval_query(canonical_question, hybrid_retriever_query_str)
 
     total_start = time.time()
 
     print("> MAA Assistant: Retrieving relevant information...")
     retrieval_start = time.time()
 
-    #semantic_nodes = hybrid._vec.retrieve(QueryBundle(query_str=question))
-    #keyword_nodes = hybrid._bm25.retrieve(QueryBundle(query_str=question))
-    hybrid_nodes = hybrid.retrieve(QueryBundle(query_str=question))
+    hybrid_nodes = hybrid.retrieve(QueryBundle(query_str=hybrid_retriever_query_str))
+    pipeline_debug_log(
+        "Interface.ask_question after hybrid.retrieve",
+        f"nodes={len(hybrid_nodes)} query_str={hybrid_retriever_query_str!r}",
+    )
 
     retrieval_time = time.time() - retrieval_start
 
-    #print(f"> MAA Assistant: Retrieved {len(semantic_nodes)} semantic nodes.")
-    #print(f"> MAA Assistant: Retrieved {len(keyword_nodes)} keyword nodes.")
     print(f"> MAA Assistant: Retrieved {len(hybrid_nodes)} fused candidate nodes.")
     print(f"> MAA Assistant: Retrieval took {retrieval_time:.2f}s")
-
-    #if see_results.lower().strip() == "y":
-        #print("\n--- SEMANTIC RESULTS ---")
-        #show_nodes(semantic_nodes)
-
-        #print("\n--- KEYWORD RESULTS ---")
-        #show_nodes(keyword_nodes)
-
-        #print("\n--- HYBRID FUSED RESULTS ---")
-        #show_nodes(hybrid_nodes)
 
     if not hybrid_nodes:
         print("> MAA Assistant: No relevant results found.")
         return
 
+    query_bundle = QueryBundle(query_str=hybrid_retriever_query_str)
+    for postprocessor in getattr(query_engine, "_node_postprocessors", []):
+        hybrid_nodes = postprocessor.postprocess_nodes(
+            hybrid_nodes,
+            query_bundle=query_bundle,
+        )
+    pipeline_debug_log(
+        "Interface.ask_question after postprocessors",
+        f"nodes={len(hybrid_nodes)}",
+    )
+
     print("> MAA Assistant: Working on response...")
     gen_start = time.time()
 
     if see_results.lower().strip() == "y":
-        print_final_context(query_engine, hybrid_nodes, question)
+        print_final_context(query_engine, hybrid_nodes, hybrid_retriever_query_str)
 
-    response = query_engine.query(question)
-
+    hybrid_nodes = dedupe_nodes_by_id(hybrid_nodes)
+    evidence_ctx = build_evidence_context(hybrid_nodes)
+    evidence_answer = run_evidence_extraction(Settings.llm, evidence_ctx, canonical_question)
+    response_text = run_final_answer(Settings.llm, evidence_answer, canonical_question)
 
     gen_time = time.time() - gen_start
-    #total_time = time.time() - total_start
 
-    if response:
-        print(f"> MAA Assistant: {response}")
+    if response_text:
+        print(f"> MAA Assistant: {response_text}")
     else:
         print("> MAA Assistant: Sorry, I don't have an answer for that")
 
@@ -349,9 +395,7 @@ def updateModel(index, template_choice: str, template_current: str, response_len
 
     template_map = {
         "q": ("Q/A", QA_TEMPLATE),
-        "s": ("Summary", SUMMARY_TEMPLATE),
         "e": ("Exposure Analysis", EXPOSURE_ANALYSIS_TEMPLATE),
-        "t": ("Timeline", TIMELINE_TEMPLATE),
         "r": ("Reference", REFERENCE_EVIDENCE_TEMPLATE),
         "c": ("Comparison", COMPARISON_TEMPLATE),
     }
@@ -425,7 +469,7 @@ def main():
             response_length = input( "> MAA Assistant: Response length? (short / medium / long): " ).strip().lower()
             template_choice = input(
                 "> MAA Assistant: Which template would you like to use? "
-                "(q = Q/A, s = summary, e = exposure, t = timeline, r = reference, c = comparison): "
+                "(q = Q/A, e = exposure, r = reference, c = comparison): "
             ).strip().lower()
 
             new_model, new_qe, new_hybrid, current_max_tokens, template_current = updateModel(

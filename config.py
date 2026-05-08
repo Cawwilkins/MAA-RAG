@@ -87,6 +87,8 @@ GENERATIVE_MODEL_CONFIG = {
     "context_window":CONTEXT_WINDOW,
 }
 
+# Used by RetrieverQueryEngine synthesizer when legacy query() path runs; main UI path uses
+# VAGUENESS_CHECK → retrieval → EVIDENCE_EXTRACTION → FINAL_ANSWER instead.
 QA_TEMPLATE = PromptTemplate(
     "Context:\n{context_str}\n\n"
     "Question: {query_str}\n\n"
@@ -97,36 +99,203 @@ QA_TEMPLATE = PromptTemplate(
     "Answer:"
 )
 
-SUMMARY_TEMPLATE = PromptTemplate(
+# Legacy templates are still imported by `Interface.py` for query-engine setup.
+# Keep these symbols defined to avoid import/runtime failures.
+EXPOSURE_ANALYSIS_TEMPLATE = PromptTemplate(
     "Context:\n{context_str}\n\n"
     "Question: {query_str}\n\n"
     "Rules:\n"
-    "- Summarize only from context.\n"
-    "- Focus on document purpose, key findings, and important details.\n"
-    "- If insufficient context, say exactly: I cannot determine this from the provided context.\n\n"
+    "- Use only provided context.\n"
+    "- Separate explicit exposure evidence from possible indicators.\n"
+    "- If evidence is missing, state what is unsupported.\n\n"
     "Answer:"
 )
 
-TIMELINE_TEMPLATE = PromptTemplate(
+REFERENCE_EVIDENCE_TEMPLATE = PromptTemplate(
     "Context:\n{context_str}\n\n"
     "Question: {query_str}\n\n"
     "Rules:\n"
-    "- Build chronology using only explicit dates/years/ranges from context.\n"
-    "- Do not invent dates.\n"
-    "- Put uncertain ordering under Undated or Unclear Events.\n\n"
-    "Format:\n"
-    "Timeline:\n"
-    "- Date/Year:\n"
-    "  Event:\n"
-
+    "- Use only provided context.\n"
+    "- Return references/evidence relevant to the question.\n"
+    "- If nothing is supported, say exactly: I cannot find this in the documents.\n\n"
     "Answer:"
 )
+
+COMPARISON_TEMPLATE = PromptTemplate(
+    "Context:\n{context_str}\n\n"
+    "Question: {query_str}\n\n"
+    "Rules:\n"
+    "- Use only provided context.\n"
+    "- Compare items only when both are supported in context.\n"
+    "- If one side is missing, clearly state the gap.\n\n"
+    "Answer:"
+)
+
+RETRIEVAL_QUERY_EXPANSION_PROMPT = PromptTemplate(
+    "Task:\n"
+    "Rewrite the user's question into text optimized for hybrid semantic + keyword (BM25) retrieval "
+    "over naval records and legal/technical document archives.\n\n"
+    "User question:\n"
+    "{question}\n\n"
+    "Rules:\n"
+    "- Output retrieval-focused wording only: do NOT answer the question.\n"
+    "- Keep every named entity, hull number, rate, date, job number, or identifier the user gave; do not drop anchors.\n"
+    "- You may add standard synonyms or alternate phrasings only when they are obvious equivalents "
+    "for terms the user already used (e.g. common document types, titles)—do not invent new facts, "
+    "ships, people, dates, or legal claims.\n"
+    "- Prefer a concise line or short paragraph suitable as a single search query.\n\n"
+    "Output format:\n\n"
+    "retrieval_query:\n"
+    "<rewritten query text>\n"
+)
+
+FINAL_QUERY_REWRITE_PROMPT = PromptTemplate(
+    "Task:\n"
+    "Rewrite the user's original question plus any clarification into one finalized retrieval query.\n\n"
+    "Original user question:\n"
+    "{question}\n\n"
+    "Additional clarification from user:\n"
+    "{clarification}\n\n"
+    "Rules:\n"
+    "- Combine the original question and clarification into one clear query.\n"
+    "- Use ONLY information provided in the original question and clarification.\n"
+    "- Do not invent facts, dates, names, vessels, jurisdictions, documents, or legal issues.\n"
+    "- Preserve legal meaning and qualifiers such as may, shall, except, unless, and subject to.\n"
+    "- Make the query specific enough for legal/document retrieval.\n"
+    "- Keep important anchors: person, company, vessel, hull number, document/report type, date range, "
+    "event, location, jurisdiction, and legal issue.\n"
+    "- Remove filler, conversation wording, and repeated phrasing.\n"
+    "- Do not answer the question.\n"
+    "- Do not explain the rewrite.\n"
+    "- Output only the finalized query string.\n\n"
+    "Finalized query:\n"
+)
+
+EVIDENCE_EXTRACTION_PROMPT = PromptTemplate(
+    "Task:\n"
+    "Extract ONLY evidence relevant to answering the question.\n\n"
+    "Question:\n"
+    "{canonical_question}\n\n"
+    "Retrieved snippets:\n"
+    "{snippets}\n\n"
+    "Instructions:\n"
+    "- Only Extract evidence that is directly relevant to the question.\n"
+    "- Do NOT summarize unrelated material.\n"
+    "- Do NOT answer the question yet.\n"
+    "- Preserve qualifiers and exceptions.\n"
+    "- Prefer exact wording from snippets.\n"
+    "- If no evidence directly supports the question, return:\n"
+    '  "Insufficient support in retrieved materials."\n\n'
+    "Output format:\n\n"
+    "relevant_evidence:\n"
+    '  evidence: "<directly relevant evidence>"\n'
+    "  supports: <specific part of question that this evidence supports>\n\n"
+)
+
+VAGUENESS_BOOLEAN_PROMPT = PromptTemplate(
+    "Task:\n"
+    "Determine whether the user's question is too vague for reliable legal RAG retrieval.\n\n"
+
+    "User question:\n"
+    "{question}\n\n"
+
+    "Rules:\n"
+    "- Return true if the question is too vague to retrieve reliable evidence.\n"
+    "- Return false if the question has enough concrete detail to retrieve relevant snippets.\n"
+    "- A question is vague if it lacks essential anchors such as who, what document/report, vessel, time period, jurisdiction, event, or legal issue.\n"
+    "- Do not explain your answer.\n"
+    "- Do not rewrite the question.\n"
+    "- Output only one lowercase boolean: true or false.\n\n"
+
+    "Output:\n"
+)
+
+CLARIFYING_QUESTION_PROMPT = PromptTemplate(
+    "Task:\n"
+    "Ask the user the minimum clarification needed to make their legal/document question answerable.\n\n"
+
+    "User question:\n"
+    "{question}\n\n"
+
+    "Rules:\n"
+    "- Ask only about missing information that is necessary to understand the question.\n"
+    "- Focus on concrete anchors and any pronouns. \n"
+    "- Prefer consice questions.\n"
+    "- Do not answer the user's question.\n"
+    "- Do not explain why clarification is needed.\n"
+    "- Do not invent facts.\n"
+    "- Keep the wording natural and direct.\n"
+    "- Do not number clarifying questions.\n"
+    "- Ask at most 4 clarifying questions. \n"
+
+    "Output format:\n"
+    "<clarifying questions>\n"
+)
+
+FINAL_ANSWER_PROMPT = PromptTemplate(
+    "Task:\n"
+    "Answer the question using ONLY the extracted evidence.\n\n"
+    "Question:\n"
+    "{canonical_question}\n\n"
+    "Extracted evidence:\n"
+    "{evidence}\n\n"
+    "Instructions:\n"
+    "- Use ONLY extracted evidence.\n"
+    "- Never use outside knowledge.\n"
+    "- Never infer beyond the evidence.\n"
+    "- If evidence is insufficient, say exactly:\n"
+    '  "Insufficient support in retrieved materials."\n'
+    "- If evidence conflicts, explicitly state the conflict.\n"
+    "- Every substantive sentence must contain citations.\n"
+    "- Keep the answer legally precise.\n"
+    "- Preserve uncertainty and legal qualifiers.\n"
+    "- Do NOT explain reasoning process.\n"
+    "- Do NOT output chain-of-thought.\n\n"
+    "Output format:\n\n"
+    "answer:\n"
+    "<grounded answer>\n\n"
+)
+
+# Pipeline LLM output limits (local model; keep modest for speed)
+VAGUENESS_CHECK_MAX_NEW_TOKENS = 64
+CLARIFYING_QUESTION_MAX_NEW_TOKENS = 256
+RETRIEVAL_QUERY_EXPANSION_MAX_NEW_TOKENS = 256
+FINAL_QUERY_REWRITE_MAX_NEW_TOKENS = 384
+EVIDENCE_EXTRACTION_MAX_NEW_TOKENS = 600
+FINAL_ANSWER_MAX_NEW_TOKENS = 640
+MAX_EVIDENCE_CONTEXT_CHARS = 8000
+
+# Terminal debug blocks for the document QA pipeline (queries + LLM prompts/responses).
+PIPELINE_DEBUG = True
+PIPELINE_DEBUG_TRUNCATE_CHARS: int | None = 8000
+
+
+def pipeline_debug_log(title: str, body: str | None = None) -> None:
+    if not PIPELINE_DEBUG:
+        return
+    bar = "=" * 72
+    print(f"\n{bar}\n[PIPELINE DEBUG] {title}\n{'-' * 72}", flush=True)
+    if body is not None:
+        text = body
+        lim = PIPELINE_DEBUG_TRUNCATE_CHARS
+        if lim is not None and len(text) > lim:
+            text = text[:lim] + f"\n... [truncated, total {len(body)} chars]"
+        print(text, flush=True)
+    print(f"{bar}\n", flush=True)
+
 
 SYSTEM_TEMPLATE = (
-    "You are a document analysis assistant.\n"
-    "Use only provided context.\n"
-    "Do not use outside knowledge.\n"
-    "Report explicit or clearly supported facts only.\n"
+    "You are an internal legal document analysis assistant.\n\n"
+    "You ONLY answer using retrieved evidence provided by the application.\n\n"
+    "Rules:\n"
+    "- Treat retrieved evidence as the sole authority.\n"
+    "- Never use outside knowledge.\n"
+    "- Never invent facts, dates, parties, legal conclusions, statutes, citations, or case law.\n"
+    '- Preserve legal qualifiers such as "may", "shall", "except", "unless", and "subject to".\n'
+    "- If evidence is insufficient, say exactly:\n"
+    '  "Insufficient support in retrieved materials."\n'
+    "- Keep answers concise, factual, and grounded.\n"
+    "- This is document analysis support, not legal advice.\n"
 )
 
 #MetaData Extraction: 

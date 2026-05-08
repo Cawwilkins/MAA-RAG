@@ -21,32 +21,29 @@ from rag_service import RAGService
 
 TEMPLATE_OPTIONS = {
     "Q/A": "q",
-    "Summary": "s",
     "Exposure Analysis": "e",
-    "Timeline": "t",
     "Reference Evidence": "r",
     "Comparison": "c",
 }
 
 TEMPLATE_DESCRIPTIONS = {
     "Q/A": "Best default. Direct factual answers grounded in retrieved context.",
-    "Summary": "High-level summary of document purpose and key points.",
     "Exposure Analysis": "Asbestos-focused analysis: confirmed/possible/unsupported exposure.",
-    "Timeline": "Chronological event extraction with dates/years and gaps called out.",
     "Reference Evidence": "Finds and formats matching reference entries/citations.",
     "Comparison": "Compares agreements, differences, contradictions, and missing info.",
 }
 
 TEMPLATE_PLACEHOLDERS = {
     "Q/A": "Ask a focused question about the documents (e.g., What does report A1234 say about asbestos exposure?)",
-    "Summary": "Ask for a concise summary (e.g., Summarize the purpose and key findings of this document.)",
     "Exposure Analysis": "Ask for exposure analysis (e.g., Analyze confirmed vs possible asbestos exposure in this record.)",
-    "Timeline": "Ask for chronology (e.g., Build a timeline of ships, rates, and assignments by year.)",
     "Reference Evidence": "Ask for references (e.g., Find reference entries about Portsmouth Naval Shipyard and asbestos.)",
     "Comparison": "Ask to compare records (e.g., Compare these two documents for differences in exposure evidence.)",
 }
 REFERENCE_EXTRACT_PLACEHOLDER = (
     "Extract grouped references (e.g., Extract all reference entries about asbestos for Portsmouth.)"
+)
+RELEVANT_DOCS_PLACEHOLDER = (
+    "List the most relevant documents for this query."
 )
 RETRIEVE_PRESETS = {
     "Strict": {
@@ -68,28 +65,37 @@ RETRIEVE_PRESETS = {
 
 
 class MAAApp(tk.Tk):
+    _SIDEBAR_EXPANDED_W = 300
+    _SIDEBAR_COLLAPSED_W = 52
+
     def __init__(self):
         super().__init__()
 
         self.title("MAA Assistant")
         self.geometry("1280x820")
-        self.minsize(1050, 680)
+        self.minsize(900, 600)
 
+        # ChatGPT-inspired dark palette (blacks and greys)
         self.colors = {
-            "bg": "#0f172a",
-            "panel": "#111827",
-            "card": "#1e293b",
-            "card_light": "#263449",
-            "border": "#334155",
-            "text": "#e5e7eb",
-            "muted": "#94a3b8",
-            "accent": "#38bdf8",
-            "accent_dark": "#0284c7",
-            "user_bubble": "#2563eb",
-            "assistant_bubble": "#1f2937",
-            "input": "#020617",
+            "bg": "#212121",
+            "sidebar": "#171717",
+            "sidebar_border": "#2f2f2f",
+            "surface": "#2f2f2f",
+            "surface_elevated": "#303030",
+            "composer": "#2f2f2f",
+            "composer_outline": "#565869",
+            "border": "#424242",
+            "text": "#ececec",
+            "muted": "#8e8e8e",
+            "accent": "#b4b4b4",
+            "accent_dark": "#8e8e8e",
+            "user_bubble": "#2f2f2f",
+            "assistant_bubble": "#212121",
+            "input": "#2f2f2f",
             "danger": "#ef4444",
-            "success": "#22c55e",
+            "success": "#4ade80",
+            "send_btn": "#ececec",
+            "send_btn_fg": "#212121",
         }
 
         self.configure(bg=self.colors["bg"])
@@ -101,6 +107,9 @@ class MAAApp(tk.Tk):
         self._request_start_time: float | None = None
         self._timer_after_id: str | None = None
         self._placeholder_active = False
+        self._pending_clarification_base: str | None = None
+        self._sidebar_expanded = True
+        self._settings_expanded = tk.BooleanVar(value=True)
 
         self._configure_styles()
         self._build_ui()
@@ -108,135 +117,223 @@ class MAAApp(tk.Tk):
         self._start_backend_load()
         self._poll_worker_queue()
 
+    @staticmethod
+    def _round_rect(canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, r: int, **kwargs) -> int:
+        """Draw a rounded rectangle on a canvas (Tk has no native rounded Frame)."""
+        r = min(r, (x2 - x1) // 2, (y2 - y1) // 2)
+        if r <= 0:
+            return canvas.create_rectangle(x1, y1, x2, y2, **kwargs)
+        return canvas.create_polygon(
+            x1 + r,
+            y1,
+            x2 - r,
+            y1,
+            x2,
+            y1,
+            x2,
+            y1 + r,
+            x2,
+            y2 - r,
+            x2,
+            y2,
+            x2 - r,
+            y2,
+            x1 + r,
+            y2,
+            x1,
+            y2,
+            x1,
+            y2 - r,
+            x1,
+            y1 + r,
+            x1,
+            y1,
+            smooth=True,
+            **kwargs,
+        )
+
     def _configure_styles(self):
         style = ttk.Style(self)
         style.theme_use("clam")
 
-        style.configure(".", background=self.colors["bg"], foreground=self.colors["text"], font=("Segoe UI", 10))
-        style.configure("Sidebar.TFrame", background=self.colors["panel"], borderwidth=0)
-        style.configure("Main.TFrame", background=self.colors["bg"])
-        style.configure("Title.TLabel", background=self.colors["panel"], foreground=self.colors["text"], font=("Segoe UI", 18, "bold"))
-        style.configure("Subtitle.TLabel", background=self.colors["panel"], foreground=self.colors["muted"], font=("Segoe UI", 9))
-        style.configure("Section.TLabel", background=self.colors["panel"], foreground=self.colors["text"], font=("Segoe UI", 11, "bold"))
-        style.configure("Muted.TLabel", background=self.colors["panel"], foreground=self.colors["muted"], font=("Segoe UI", 9))
-        style.configure("Status.TLabel", background=self.colors["bg"], foreground=self.colors["muted"], font=("Segoe UI", 9))
+        c = self.colors
+        style.configure(".", background=c["bg"], foreground=c["text"], font=("Segoe UI", 10))
+        style.configure("Sidebar.TFrame", background=c["sidebar"], borderwidth=0)
+        style.configure("Main.TFrame", background=c["bg"])
+        style.configure("Title.TLabel", background=c["sidebar"], foreground=c["text"], font=("Segoe UI", 13, "bold"))
+        style.configure("Subtitle.TLabel", background=c["sidebar"], foreground=c["muted"], font=("Segoe UI", 9))
+        style.configure("Section.TLabel", background=c["sidebar"], foreground=c["text"], font=("Segoe UI", 10, "bold"))
+        style.configure("Muted.TLabel", background=c["sidebar"], foreground=c["muted"], font=("Segoe UI", 9))
+        style.configure("Status.TLabel", background=c["bg"], foreground=c["muted"], font=("Segoe UI", 9))
+        style.configure("ChatTitle.TLabel", background=c["bg"], foreground=c["text"], font=("Segoe UI", 15, "bold"))
 
-        style.configure("Modern.TButton", background=self.colors["accent"], foreground="#00111f", borderwidth=0, padding=(14, 10), font=("Segoe UI", 10, "bold"))
-        style.map("Modern.TButton", background=[("disabled", self.colors["border"]), ("active", self.colors["accent_dark"])], foreground=[("disabled", self.colors["muted"]), ("active", "#ffffff")])
+        style.configure(
+            "Modern.TButton",
+            background=c["send_btn"],
+            foreground=c["send_btn_fg"],
+            borderwidth=0,
+            padding=(16, 10),
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.map(
+            "Modern.TButton",
+            background=[("disabled", c["border"]), ("active", "#d6d6d6")],
+            foreground=[("disabled", c["muted"]), ("active", c["send_btn_fg"])],
+        )
 
-        style.configure("Secondary.TButton", background=self.colors["card_light"], foreground=self.colors["text"], borderwidth=0, padding=(12, 8))
-        style.map("Secondary.TButton", background=[("active", self.colors["border"])])
+        style.configure("Secondary.TButton", background=c["surface"], foreground=c["text"], borderwidth=0, padding=(10, 8))
+        style.map("Secondary.TButton", background=[("active", c["border"])])
 
-        style.configure("TCombobox", fieldbackground=self.colors["input"], background=self.colors["card_light"], foreground=self.colors["text"], arrowcolor=self.colors["text"], bordercolor=self.colors["border"], padding=6)
-        style.map("TCombobox", fieldbackground=[("readonly", self.colors["input"])], foreground=[("readonly", self.colors["text"])], selectbackground=[("readonly", self.colors["input"])], selectforeground=[("readonly", self.colors["text"])])
+        style.configure("Ghost.TButton", background=c["sidebar"], foreground=c["muted"], borderwidth=0, padding=(6, 4))
+        style.map("Ghost.TButton", background=[("active", c["surface"])])
+
+        style.configure(
+            "TCombobox",
+            fieldbackground=c["input"],
+            background=c["surface"],
+            foreground=c["text"],
+            arrowcolor=c["text"],
+            bordercolor=c["border"],
+            padding=6,
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", c["input"])],
+            foreground=[("readonly", c["text"])],
+            selectbackground=[("readonly", c["input"])],
+            selectforeground=[("readonly", c["text"])],
+        )
         style.configure(
             "TEntry",
-            fieldbackground="#ffffff",
-            foreground="#111111",
-            bordercolor=self.colors["border"],
-            insertcolor="#111111",
+            fieldbackground=c["input"],
+            foreground=c["text"],
+            bordercolor=c["border"],
+            insertcolor=c["text"],
             padding=6,
         )
 
-        style.configure("TCheckbutton", background=self.colors["panel"], foreground=self.colors["text"], focuscolor=self.colors["panel"], font=("Segoe UI", 9))
-        style.map("TCheckbutton", background=[("active", self.colors["panel"])], foreground=[("active", self.colors["text"])])
-        style.configure("TSeparator", background=self.colors["border"])
+        style.configure(
+            "TCheckbutton",
+            background=c["sidebar"],
+            foreground=c["text"],
+            focuscolor=c["sidebar"],
+            font=("Segoe UI", 9),
+        )
+        style.map("TCheckbutton", background=[("active", c["sidebar"])], foreground=[("active", c["text"])])
+
+        style.configure(
+            "TRadiobutton",
+            background=c["sidebar"],
+            foreground=c["text"],
+            focuscolor=c["sidebar"],
+            font=("Segoe UI", 9),
+        )
+        style.map("TRadiobutton", background=[("active", c["sidebar"])], foreground=[("active", c["text"])])
+
+        style.configure("TSeparator", background=c["sidebar_border"])
 
     def _build_ui(self):
         self.columnconfigure(0, weight=0)
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
 
-        self.sidebar = ttk.Frame(self, style="Sidebar.TFrame", padding=(22, 20))
-        self.sidebar.grid(row=0, column=0, sticky="ns")
-        self.sidebar.configure(width=380)
+        self.sidebar = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 12))
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self.sidebar.configure(width=self._SIDEBAR_EXPANDED_W)
         self.sidebar.grid_propagate(False)
         self.sidebar.columnconfigure(0, weight=1)
+        self.sidebar.rowconfigure(1, weight=1)
 
-        ttk.Label(self.sidebar, text="MAA Assistant", style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(self.sidebar, text="Local document intelligence", style="Subtitle.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 22))
+        self.sidebar_header = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
+        self.sidebar_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.sidebar_header.columnconfigure(0, weight=1)
 
-        ttk.Label(self.sidebar, text="Search Settings", style="Section.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 10))
-        ttk.Label(self.sidebar, text="Response length", style="Muted.TLabel").grid(row=3, column=0, sticky="w")
-        self.response_length_var = tk.StringVar(value="MEDIUM")
-        self.response_length_combo = ttk.Combobox(self.sidebar, textvariable=self.response_length_var, values=["SHORT", "MEDIUM", "LONG"], state="readonly")
-        self.response_length_combo.grid(row=4, column=0, sticky="ew", pady=(4, 12))
+        self.sidebar_toggle_btn = ttk.Button(
+            self.sidebar_header,
+            text="‹",
+            style="Ghost.TButton",
+            width=3,
+            command=self._toggle_sidebar,
+        )
+        self.sidebar_toggle_btn.grid(row=0, column=1, sticky="e")
 
-        ttk.Label(self.sidebar, text="Template", style="Muted.TLabel").grid(row=5, column=0, sticky="w")
+        self.sidebar_title_block = ttk.Frame(self.sidebar_header, style="Sidebar.TFrame")
+        self.sidebar_title_block.grid(row=0, column=0, sticky="w")
+        ttk.Label(self.sidebar_title_block, text="MAA Assistant", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(self.sidebar_title_block, text="Local documents", style="Subtitle.TLabel").grid(row=1, column=0, sticky="w")
+
+        self.sidebar_body = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
+        self.sidebar_body.grid(row=1, column=0, sticky="nsew")
+        self.sidebar_body.columnconfigure(0, weight=1)
+        self.sidebar_body.rowconfigure(1, weight=1)
+
+        self.settings_toggle_btn = tk.Button(
+            self.sidebar_body,
+            text="  ⚙  Settings  ▼",
+            anchor="w",
+            font=("Segoe UI", 10),
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            activebackground=self.colors["border"],
+            activeforeground=self.colors["text"],
+            relief=tk.FLAT,
+            cursor="hand2",
+            padx=12,
+            pady=10,
+            command=self._toggle_settings_panel,
+        )
+        self.settings_toggle_btn.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+
+        self.settings_inner = ttk.Frame(self.sidebar_body, style="Sidebar.TFrame", padding=(0, 0, 0, 8))
+        self.settings_inner.grid(row=1, column=0, sticky="nsew")
+        self.settings_inner.columnconfigure(0, weight=1)
+
+        # Keep template/length logic in backend, but remove selection controls from UI.
+        self.response_length_var = tk.StringVar(value="LONG")
         self.template_var = tk.StringVar(value="Q/A")
-        self.template_combo = ttk.Combobox(self.sidebar, textvariable=self.template_var, values=list(TEMPLATE_OPTIONS.keys()), state="readonly")
-        self.template_combo.grid(row=6, column=0, sticky="ew", pady=(4, 14))
-        self.template_combo.bind("<<ComboboxSelected>>", self._on_template_changed)
         self.template_help_var = tk.StringVar(value=TEMPLATE_DESCRIPTIONS.get("Q/A", ""))
-        ttk.Label(
-            self.sidebar,
-            textvariable=self.template_help_var,
-            style="Muted.TLabel",
-            wraplength=330,
-            justify="left",
-        ).grid(row=7, column=0, sticky="w", pady=(0, 10))
 
-        self.show_used_nodes_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self.sidebar, text="Show used nodes", variable=self.show_used_nodes_var).grid(row=8, column=0, sticky="w", pady=(0, 16))
+        # Intelligent AI mode always shows used nodes by default.
+        self.show_used_nodes_var = tk.BooleanVar(value=True)
 
-        ttk.Separator(self.sidebar).grid(row=9, column=0, sticky="ew", pady=(4, 10))
-        ttk.Label(self.sidebar, text="Retrieve-Only Mode", style="Section.TLabel").grid(row=10, column=0, sticky="w", pady=(0, 8))
-        self.retrieve_only_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self.sidebar, text="Retrieve only (skip LLM answer)", variable=self.retrieve_only_var).grid(row=11, column=0, sticky="w", pady=(0, 6))
-        self.reference_extract_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            self.sidebar,
-            text="Reference extract mode (group refs by doc/page)",
-            variable=self.reference_extract_var,
-            command=self._on_reference_extract_toggled,
-        ).grid(row=12, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(self.sidebar, text="View up to (max results)", style="Muted.TLabel").grid(row=13, column=0, sticky="w")
-        self.retrieve_max_results_var = tk.StringVar(value=str(RETRIEVE_ONLY_DEFAULT_TOP_K))
-        ttk.Entry(self.sidebar, textvariable=self.retrieve_max_results_var).grid(row=14, column=0, sticky="ew", pady=(4, 8))
-        ttk.Label(self.sidebar, text="Relevance ratio (0.00 - 1.00)", style="Muted.TLabel").grid(row=15, column=0, sticky="w")
-        self.retrieve_ratio_var = tk.StringVar(value=f"{RETRIEVE_ONLY_DEFAULT_RATIO:.2f}")
-        ttk.Entry(self.sidebar, textvariable=self.retrieve_ratio_var).grid(row=16, column=0, sticky="ew", pady=(4, 14))
+        ttk.Label(self.settings_inner, text="Mode", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.mode_var = tk.StringVar(value="ai")
+        mode_frm = ttk.Frame(self.settings_inner, style="Sidebar.TFrame")
+        mode_frm.grid(row=1, column=0, sticky="ew")
+        ttk.Radiobutton(
+            mode_frm,
+            text="Intellegent (AI)",
+            value="ai",
+            variable=self.mode_var,
+            command=self._on_mode_changed,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 2))
+        ttk.Radiobutton(
+            mode_frm,
+            text="List relevant docs",
+            value="docs",
+            variable=self.mode_var,
+            command=self._on_mode_changed,
+        ).grid(row=1, column=0, sticky="w", pady=(0, 2))
+        ttk.Radiobutton(
+            mode_frm,
+            text="List relevant references",
+            value="refs",
+            variable=self.mode_var,
+            command=self._on_mode_changed,
+        ).grid(row=2, column=0, sticky="w", pady=(0, 8))
 
-        ttk.Label(self.sidebar, text="Retrieve preset", style="Muted.TLabel").grid(row=17, column=0, sticky="w")
-        preset_row = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
-        preset_row.grid(row=18, column=0, sticky="ew", pady=(4, 8))
-        preset_row.columnconfigure((0, 1, 2), weight=1)
-        ttk.Button(
-            preset_row,
-            text="Strict",
-            style="Secondary.TButton",
-            command=lambda: self._apply_retrieve_preset("Strict"),
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(
-            preset_row,
-            text="Balanced",
-            style="Secondary.TButton",
-            command=lambda: self._apply_retrieve_preset("Balanced"),
-        ).grid(row=0, column=1, sticky="ew", padx=2)
-        ttk.Button(
-            preset_row,
-            text="Broad",
-            style="Secondary.TButton",
-            command=lambda: self._apply_retrieve_preset("Broad"),
-        ).grid(row=0, column=2, sticky="ew", padx=(4, 0))
-        self.retrieve_preset_help_var = tk.StringVar(value=RETRIEVE_PRESETS["Balanced"]["summary"])
-        ttk.Label(
-            self.sidebar,
-            textvariable=self.retrieve_preset_help_var,
-            style="Muted.TLabel",
-            wraplength=330,
-            justify="left",
-        ).grid(row=19, column=0, sticky="w", pady=(0, 8))
+        self.retrieve_max_results_var = tk.StringVar(value="80")
+        self.retrieve_ratio_var = tk.StringVar(value="0.85")
 
-        ttk.Separator(self.sidebar).grid(row=20, column=0, sticky="ew", pady=(4, 18))
-        ttk.Label(self.sidebar, text="Metadata Filters", style="Section.TLabel").grid(row=21, column=0, sticky="w", pady=(0, 10))
+        ttk.Separator(self.settings_inner).grid(row=2, column=0, sticky="ew", pady=(4, 10))
+        ttk.Label(self.settings_inner, text="Metadata filters", style="Section.TLabel").grid(row=3, column=0, sticky="w", pady=(0, 6))
 
-        self.filter_canvas = tk.Canvas(self.sidebar, bg=self.colors["panel"], highlightthickness=0, height=370)
-        self.filter_canvas.grid(row=22, column=0, sticky="nsew")
-        self.sidebar.rowconfigure(22, weight=1)
+        self.filter_canvas = tk.Canvas(self.settings_inner, bg=self.colors["sidebar"], highlightthickness=0, height=280)
+        self.filter_canvas.grid(row=4, column=0, sticky="nsew")
+        self.settings_inner.rowconfigure(4, weight=1)
 
-        self.filter_scrollbar = ttk.Scrollbar(self.sidebar, orient="vertical", command=self.filter_canvas.yview)
-        self.filter_scrollbar.grid(row=22, column=1, sticky="ns")
+        self.filter_scrollbar = ttk.Scrollbar(self.settings_inner, orient="vertical", command=self.filter_canvas.yview)
+        self.filter_scrollbar.grid(row=4, column=1, sticky="ns")
 
         self.filters_frame = ttk.Frame(self.filter_canvas, style="Sidebar.TFrame")
         self.filters_frame.columnconfigure(0, weight=1)
@@ -245,49 +342,132 @@ class MAAApp(tk.Tk):
         self.filters_frame.bind("<Configure>", self._on_filters_configure)
         self.filter_canvas.bind("<Configure>", self._on_canvas_configure)
 
-        self.clear_filters_button = ttk.Button(self.sidebar, text="Clear Filters", style="Secondary.TButton", command=self._clear_filters)
-        self.clear_filters_button.grid(row=23, column=0, sticky="ew", pady=(16, 0))
+        self.clear_filters_button = ttk.Button(
+            self.settings_inner,
+            text="Clear filters",
+            style="Secondary.TButton",
+            command=self._clear_filters,
+        )
+        self.clear_filters_button.grid(row=5, column=0, sticky="ew", pady=(10, 0))
 
-        self.main = ttk.Frame(self, style="Main.TFrame", padding=(14, 16))
+        self.sidebar_rail = ttk.Frame(self, style="Sidebar.TFrame", padding=(6, 12))
+        self.sidebar_rail.grid(row=0, column=0, sticky="nsew")
+        self.sidebar_rail.grid_remove()
+        self.sidebar_rail.configure(width=self._SIDEBAR_COLLAPSED_W)
+        self.sidebar_rail.grid_propagate(False)
+        self.expand_from_rail_btn = ttk.Button(
+            self.sidebar_rail,
+            text="›",
+            style="Ghost.TButton",
+            width=3,
+            command=self._toggle_sidebar,
+        )
+        self.expand_from_rail_btn.pack(anchor="n")
+
+        self.main = ttk.Frame(self, style="Main.TFrame", padding=(0, 0, 0, 0))
         self.main.grid(row=0, column=1, sticky="nsew")
         self.main.columnconfigure(0, weight=1)
         self.main.rowconfigure(1, weight=1)
 
-        self.header = ttk.Frame(self.main, style="Main.TFrame")
-        self.header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        self.header = ttk.Frame(self.main, style="Main.TFrame", padding=(24, 16, 24, 8))
+        self.header.grid(row=0, column=0, sticky="ew")
         self.header.columnconfigure(0, weight=1)
 
-        tk.Label(self.header, text="Document Chat", bg=self.colors["bg"], fg=self.colors["text"], font=("Segoe UI", 20, "bold")).grid(row=0, column=0, sticky="w")
-        self.status_pill = tk.Label(self.header, text="Loading...", bg=self.colors["card"], fg=self.colors["muted"], font=("Segoe UI", 9, "bold"), padx=12, pady=6)
+        ttk.Label(self.header, text="Chat", style="ChatTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.status_pill = tk.Label(
+            self.header,
+            text="Loading…",
+            bg=self.colors["surface_elevated"],
+            fg=self.colors["muted"],
+            font=("Segoe UI", 9),
+            padx=10,
+            pady=4,
+        )
         self.status_pill.grid(row=0, column=1, sticky="e")
 
-        self.chat_card = tk.Frame(self.main, bg=self.colors["card"], highlightbackground=self.colors["border"], highlightthickness=1)
-        self.chat_card.grid(row=1, column=0, sticky="nsew")
+        self.chat_card = tk.Frame(self.main, bg=self.colors["bg"], highlightthickness=0)
+        self.chat_card.grid(row=1, column=0, sticky="nsew", padx=(16, 16))
         self.chat_card.columnconfigure(0, weight=1)
         self.chat_card.rowconfigure(0, weight=1)
 
-        self.chat_text = tk.Text(self.chat_card, wrap="word", state="disabled", font=("Segoe UI", 10), padx=18, pady=18, bg=self.colors["card"], fg=self.colors["text"], insertbackground=self.colors["text"], borderwidth=0, highlightthickness=0, selectbackground=self.colors["accent_dark"])
+        self.chat_text = tk.Text(
+            self.chat_card,
+            wrap="word",
+            state="disabled",
+            font=("Segoe UI", 11),
+            padx=24,
+            pady=20,
+            bg=self.colors["bg"],
+            fg=self.colors["text"],
+            insertbackground=self.colors["text"],
+            borderwidth=0,
+            highlightthickness=0,
+            selectbackground=self.colors["surface"],
+        )
         self.chat_text.grid(row=0, column=0, sticky="nsew")
         self.scrollbar = ttk.Scrollbar(self.chat_card, command=self.chat_text.yview)
         self.scrollbar.grid(row=0, column=1, sticky="ns")
         self.chat_text.configure(yscrollcommand=self.scrollbar.set)
 
-        self.chat_text.tag_configure("speaker_user", foreground="#bfdbfe", font=("Segoe UI", 10, "bold"), spacing1=12)
-        self.chat_text.tag_configure("speaker_assistant", foreground=self.colors["accent"], font=("Segoe UI", 10, "bold"), spacing1=12)
-        self.chat_text.tag_configure("user_msg", foreground="#ffffff", background=self.colors["user_bubble"], lmargin1=18, lmargin2=18, rmargin=90, spacing1=4, spacing3=12)
-        self.chat_text.tag_configure("assistant_msg", foreground=self.colors["text"], background=self.colors["assistant_bubble"], lmargin1=18, lmargin2=18, rmargin=70, spacing1=4, spacing3=12)
+        self.chat_text.tag_configure("speaker_user", foreground=self.colors["muted"], font=("Segoe UI", 9, "bold"), spacing1=16)
+        self.chat_text.tag_configure("speaker_assistant", foreground=self.colors["muted"], font=("Segoe UI", 9, "bold"), spacing1=16)
+        self.chat_text.tag_configure(
+            "user_msg",
+            foreground=self.colors["text"],
+            background=self.colors["user_bubble"],
+            lmargin1=120,
+            lmargin2=24,
+            rmargin=24,
+            spacing1=6,
+            spacing3=14,
+        )
+        self.chat_text.tag_configure(
+            "assistant_msg",
+            foreground=self.colors["text"],
+            background=self.colors["assistant_bubble"],
+            lmargin1=24,
+            lmargin2=24,
+            rmargin=120,
+            spacing1=6,
+            spacing3=14,
+        )
         self.chat_text.tag_configure("result_header", foreground=self.colors["accent"], font=("Segoe UI", 10, "bold"))
         self.chat_text.tag_configure("result_row", foreground=self.colors["text"])
-        self.chat_text.tag_configure("result_toggle", foreground="#93c5fd", underline=True)
-        self.chat_text.tag_configure("result_detail", foreground="#cbd5e1")
-        self.chat_text.tag_configure("result_link", foreground="#93c5fd", underline=True)
+        self.chat_text.tag_configure("result_toggle", foreground=self.colors["accent"], underline=True)
+        self.chat_text.tag_configure("result_detail", foreground=self.colors["muted"])
+        self.chat_text.tag_configure("result_link", foreground=self.colors["accent"], underline=True)
 
-        self.input_card = tk.Frame(self.main, bg=self.colors["input"], highlightbackground=self.colors["border"], highlightthickness=1)
-        self.input_card.grid(row=2, column=0, sticky="ew", pady=(14, 8))
-        self.input_card.columnconfigure(0, weight=1)
+        composer_wrap = ttk.Frame(self.main, style="Main.TFrame", padding=(16, 8, 16, 20))
+        composer_wrap.grid(row=2, column=0, sticky="ew")
+        composer_wrap.columnconfigure(0, weight=1)
 
-        self.question_entry = tk.Text(self.input_card, height=4, wrap="word", font=("Segoe UI", 11), bg=self.colors["input"], fg=self.colors["text"], insertbackground=self.colors["text"], borderwidth=0, highlightthickness=0, padx=14, pady=12)
-        self.question_entry.grid(row=0, column=0, sticky="ew")
+        self.composer_canvas = tk.Canvas(
+            composer_wrap,
+            height=128,
+            bg=self.colors["bg"],
+            highlightthickness=0,
+            bd=0,
+        )
+        self.composer_canvas.grid(row=0, column=0, sticky="ew")
+
+        self.composer_inner = tk.Frame(self.composer_canvas, bg=self.colors["composer"])
+        self.composer_inner.columnconfigure(0, weight=1)
+        self.composer_inner.rowconfigure(0, weight=1)
+
+        self.question_entry = tk.Text(
+            self.composer_inner,
+            height=3,
+            wrap="word",
+            font=("Segoe UI", 11),
+            bg=self.colors["composer"],
+            fg=self.colors["text"],
+            insertbackground=self.colors["text"],
+            borderwidth=0,
+            highlightthickness=0,
+            padx=16,
+            pady=14,
+        )
+        self.question_entry.grid(row=0, column=0, sticky="nsew", padx=(4, 4), pady=(4, 4))
         self.question_entry.bind("<Return>", self._on_enter_submit)
         self.question_entry.bind("<KP_Enter>", self._on_enter_submit)
         self.question_entry.bind("<Shift-Return>", self._on_shift_enter_newline)
@@ -297,21 +477,78 @@ class MAAApp(tk.Tk):
         self.question_entry.bind("<FocusIn>", self._on_question_focus_in)
         self.question_entry.bind("<FocusOut>", self._on_question_focus_out)
 
-        self.ask_button = ttk.Button(self.input_card, text="Ask", style="Modern.TButton", command=self._ask_question, state="disabled")
-        self.ask_button.grid(row=0, column=1, sticky="ns", padx=(8, 10), pady=10)
+        self.ask_button = ttk.Button(
+            self.composer_inner,
+            text="Send",
+            style="Modern.TButton",
+            command=self._ask_question,
+            state="disabled",
+        )
+        self.ask_button.grid(row=0, column=1, sticky="se", padx=(0, 12), pady=(0, 12))
 
-        self.status_var = tk.StringVar(value="Loading local RAG system...")
-        self.status_label = ttk.Label(self.main, textvariable=self.status_var, style="Status.TLabel")
+        self._composer_window_id = self.composer_canvas.create_window(0, 0, window=self.composer_inner, anchor="nw")
+        self.composer_canvas.bind("<Configure>", self._on_composer_configure)
+
+        self.status_var = tk.StringVar(value="Loading local RAG system…")
+        self.status_label = ttk.Label(self.main, textvariable=self.status_var, style="Status.TLabel", padding=(24, 0, 24, 8))
         self.status_label.grid(row=3, column=0, sticky="w")
 
-        self._append_assistant_message("MAA Assistant is starting locally. Once loading finishes, ask a question below.")
+        self._append_assistant_message("MAA Assistant is starting locally. Once loading finishes, type a message below.")
         self._set_question_placeholder(force=True)
+        self._update_settings_toggle_label()
 
     def _on_filters_configure(self, event):
         self.filter_canvas.configure(scrollregion=self.filter_canvas.bbox("all"))
 
     def _on_canvas_configure(self, event):
         self.filter_canvas.itemconfigure(self.filter_window, width=event.width)
+
+    def _on_composer_configure(self, event):
+        w = max(int(event.width), 120)
+        h = max(int(event.height), 88)
+        inset = 1
+        radius = 22
+        self.composer_canvas.delete("composer_bg")
+        self._round_rect(
+            self.composer_canvas,
+            inset,
+            inset,
+            w - inset,
+            h - inset,
+            radius,
+            fill=self.colors["composer"],
+            outline=self.colors["composer_outline"],
+            width=1,
+            tags="composer_bg",
+        )
+        inner_margin = 10
+        self.composer_canvas.coords(self._composer_window_id, inner_margin, inner_margin)
+        self.composer_inner.configure(width=w - 2 * inner_margin, height=h - 2 * inner_margin)
+        self.composer_canvas.tag_lower("composer_bg", self._composer_window_id)
+
+    def _toggle_sidebar(self):
+        self._sidebar_expanded = not self._sidebar_expanded
+        if self._sidebar_expanded:
+            self.sidebar_rail.grid_remove()
+            self.sidebar.grid(row=0, column=0, sticky="nsew")
+            self.sidebar.configure(width=self._SIDEBAR_EXPANDED_W)
+            self.sidebar_toggle_btn.configure(text="‹")
+        else:
+            self.sidebar.grid_remove()
+            self.sidebar_rail.grid(row=0, column=0, sticky="nsew")
+            self.expand_from_rail_btn.configure(text="›")
+
+    def _toggle_settings_panel(self):
+        self._settings_expanded.set(not self._settings_expanded.get())
+        if self._settings_expanded.get():
+            self.settings_inner.grid(row=1, column=0, sticky="nsew")
+        else:
+            self.settings_inner.grid_remove()
+        self._update_settings_toggle_label()
+
+    def _update_settings_toggle_label(self):
+        arrow = "▼" if self._settings_expanded.get() else "▶"
+        self.settings_toggle_btn.configure(text=f"  ⚙  Settings  {arrow}")
 
     def _load_facets(self):
         for child in self.filters_frame.winfo_children():
@@ -344,13 +581,11 @@ class MAAApp(tk.Tk):
             self.facet_vars[field] = var
 
     def _on_template_changed(self, _event=None):
-        selected = self.template_var.get()
-        self.template_help_var.set(TEMPLATE_DESCRIPTIONS.get(selected, ""))
         current_text = self.question_entry.get("1.0", "end").strip()
         if self._placeholder_active or not current_text:
             self._set_question_placeholder(force=True)
 
-    def _on_reference_extract_toggled(self):
+    def _on_mode_changed(self):
         current_text = self.question_entry.get("1.0", "end").strip()
         if self._placeholder_active or not current_text:
             self._set_question_placeholder(force=True)
@@ -361,7 +596,6 @@ class MAAApp(tk.Tk):
             return
         self.retrieve_max_results_var.set(str(preset["top_k"]))
         self.retrieve_ratio_var.set(f"{preset['ratio']:.2f}")
-        self.retrieve_preset_help_var.set(str(preset["summary"]))
 
     def _start_backend_load(self):
         def load_backend():
@@ -380,29 +614,51 @@ class MAAApp(tk.Tk):
                     self.rag = payload
                     self.ask_button.configure(state="normal")
                     self.status_var.set("Ready.")
-                    self.status_pill.configure(text="Ready", fg=self.colors["success"], bg=self.colors["card"])
+                    self.status_pill.configure(
+                        text="Ready",
+                        fg=self.colors["success"],
+                        bg=self.colors["surface_elevated"],
+                    )
                     self._append_assistant_message("Ready. The local document assistant is loaded.")
                 elif event == "answer":
-                    if payload.get("reference_extract"):
-                        self._append_reference_extract_results(payload)
-                    elif payload.get("retrieve_only"):
-                        self._append_retrieve_only_results(payload)
+                    if payload.get("needs_clarification"):
+                        self._pending_clarification_base = payload.get("pending_question")
+                        self._append_assistant_message(
+                            payload.get("clarification_message", "Please add a bit more detail.")
+                        )
                     else:
-                        if payload.get("used_nodes_text") and payload.get("sources"):
-                            self._append_used_nodes_results(payload.get("sources", []))
-                        self._append_assistant_message(payload["answer"])
+                        self._pending_clarification_base = None
+                        if payload.get("reference_extract"):
+                            self._append_reference_extract_results(payload)
+                        elif payload.get("retrieve_only"):
+                            self._append_retrieve_only_results(payload)
+                        else:
+                            if payload.get("used_nodes_text") and payload.get("sources"):
+                                self._append_used_nodes_results(payload.get("sources", []))
+                            self._append_assistant_message(payload["answer"])
                     self.ask_button.configure(state="normal")
                     elapsed = self._stop_request_timer()
-                    if elapsed is not None:
+                    if payload.get("needs_clarification"):
+                        self.status_var.set("Please reply with the requested detail (one follow-up).")
+                    elif elapsed is not None:
                         self.status_var.set(f"Answer returned in {elapsed:.2f} seconds.")
                     else:
                         self.status_var.set("Answer returned.")
-                    self.status_pill.configure(text="Ready", fg=self.colors["success"])
+                    self.status_pill.configure(
+                        text="Ready",
+                        fg=self.colors["success"],
+                        bg=self.colors["surface_elevated"],
+                    )
                 elif event == "error":
+                    self._pending_clarification_base = None
                     self.ask_button.configure(state="normal" if self.rag else "disabled")
                     self._stop_request_timer()
                     self.status_var.set("Error.")
-                    self.status_pill.configure(text="Error", fg=self.colors["danger"])
+                    self.status_pill.configure(
+                        text="Error",
+                        fg=self.colors["danger"],
+                        bg=self.colors["surface_elevated"],
+                    )
                     messagebox.showerror("MAA Assistant Error", payload)
                     self._append_assistant_message(f"Error: {payload}")
                 elif event == "progress":
@@ -582,46 +838,15 @@ class MAAApp(tk.Tk):
             detail_tag = f"details_block_{self._detail_counter}"
             self._detail_counter += 1
 
-            self.chat_text.insert("end", "   Click to expand details\n", ("result_toggle", toggle_tag))
+            self.chat_text.insert("end", "   Click to expand excerpt\n", ("result_toggle", toggle_tag))
 
-            fields = [
-                ("Document Type", meta.get("doc_type")),
-                ("Job Number", meta.get("job_number")),
-                ("Section", meta.get("section")),
-                ("Source", meta.get("source")),
-                ("Source Quality", meta.get("source_quality")),
-                ("File Path", meta.get("file_path")),
-                ("Source ID", meta.get("source_id")),
-                ("Ships", meta.get("ships")),
-                ("Ship Classes", meta.get("ship_classes")),
-                ("Years Mentioned", meta.get("years_mentioned")),
-                ("Rates Mentioned", meta.get("rates_mentioned")),
-                ("Shipyards Mentioned", meta.get("shipyards_mentioned")),
-            ]
-            details_lines = []
-            file_path_value = None
-            for label, value in fields:
-                clean_value = self._compact_value(value)
-                if clean_value:
-                    if label == "File Path":
-                        file_path_value = clean_value
-                    else:
-                        details_lines.append(f"      {label}: {clean_value}")
-
-            excerpt = self._compact_text(getattr(node, "text", "") or "")[:1200]
-            if excerpt:
-                details_lines.append(f"      Excerpt: {excerpt}")
-
-            details_text = "\n".join(details_lines)
-            if details_text:
-                self.chat_text.insert("end", details_text + "\n", ("result_detail", detail_tag))
-            if file_path_value:
-                link_tag = f"path_link_{self._detail_counter}"
-                self.chat_text.insert("end", "      File Path: ", ("result_detail", detail_tag))
-                self.chat_text.insert("end", f"{file_path_value}\n", ("result_link", detail_tag, link_tag))
-                self.chat_text.tag_bind(link_tag, "<Button-1>", lambda _e, p=file_path_value: self._open_local_path(p))
-                self.chat_text.tag_bind(link_tag, "<Enter>", lambda _e: self.chat_text.config(cursor="hand2"))
-                self.chat_text.tag_bind(link_tag, "<Leave>", lambda _e: self.chat_text.config(cursor="xterm"))
+            raw_excerpt = (getattr(node, "text", "") or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+            if raw_excerpt:
+                indented = "\n".join(f"      {line}" for line in raw_excerpt.split("\n"))
+                details_text = indented + "\n"
+            else:
+                details_text = "      (No excerpt text.)\n"
+            self.chat_text.insert("end", details_text, ("result_detail", detail_tag))
             self.chat_text.insert("end", "\n", ("result_detail", detail_tag))
             self.chat_text.tag_configure(detail_tag, elide=True)
 
@@ -871,8 +1096,11 @@ class MAAApp(tk.Tk):
             current = self.question_entry.get("1.0", "end").strip()
             if current:
                 return
-        if self.reference_extract_var.get():
+        mode = self.mode_var.get()
+        if mode == "refs":
             placeholder = REFERENCE_EXTRACT_PLACEHOLDER
+        elif mode == "docs":
+            placeholder = RELEVANT_DOCS_PLACEHOLDER
         else:
             placeholder = TEMPLATE_PLACEHOLDERS.get(self.template_var.get(), "Ask a question about the documents...")
         self.question_entry.delete("1.0", "end")
@@ -908,26 +1136,40 @@ class MAAApp(tk.Tk):
         self.question_entry.delete("1.0", "end")
         self.question_entry.configure(fg=self.colors["text"])
         self._append_user_message(question)
-        show_used_nodes = self.show_used_nodes_var.get()
         response_length = self.response_length_var.get().lower()
         template_choice = TEMPLATE_OPTIONS[self.template_var.get()]
         metadata_filters = self._get_metadata_filters()
-        references_only = template_choice == "r"
-        retrieve_only = self.retrieve_only_var.get()
-        reference_extract = self.reference_extract_var.get()
-        if reference_extract:
+        mode = self.mode_var.get()
+        if mode == "ai":
+            show_used_nodes = True
+            references_only = False
+            retrieve_only = False
+            reference_extract = False
+        elif mode == "docs":
+            show_used_nodes = False
+            references_only = False
             retrieve_only = True
+            reference_extract = False
+        else:
+            show_used_nodes = False
             references_only = True
+            retrieve_only = True
+            reference_extract = True
             template_choice = "r"
         retrieve_max_results, retrieve_relevance_ratio = self._parse_retrieve_only_settings()
         self.ask_button.configure(state="disabled")
         self._start_request_timer()
-        self.status_pill.configure(text="Searching...", fg=self.colors["accent"])
+        self.status_pill.configure(
+            text="Searching…",
+            fg=self.colors["text"],
+            bg=self.colors["surface_elevated"],
+        )
         def run_question():
             try:
                 def emit_progress(message: str):
                     self.worker_queue.put(("progress", message))
 
+                pending = self._pending_clarification_base
                 result = self.rag.ask(
                     question=question,
                     response_length=response_length,
@@ -939,6 +1181,8 @@ class MAAApp(tk.Tk):
                     retrieve_max_results=retrieve_max_results,
                     retrieve_relevance_ratio=retrieve_relevance_ratio,
                     progress_callback=emit_progress,
+                    clarification_reply=question if pending else None,
+                    pending_question=pending,
                 )
                 result["reference_extract"] = reference_extract
                 result["query"] = question
